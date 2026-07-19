@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 模型文件（首次使用 faster-whisper 时自动下载，体积大）
+.models/
+
+# 中间工作目录
+.work/
+
+# 输出目录
+output/
+
+# 配置文件（含 API Key 等敏感信息）
+.env
+transvideo_config.yaml
+transvideo_config.json
+
+# 日志
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# TRAE 内部
+.trae/
+.aisf/
+
+# 临时文件
+*.tmp
+*.bak
+*.part
