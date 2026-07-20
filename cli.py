@@ -681,16 +681,18 @@ def interactive_config(config: Config):
         info("字幕样式", f"{config.subtitle_style} / {config.subtitle_fontsize}px / margin_v={config.subtitle_margin_v}")
         info("换行阈值", f"{config.subtitle_max_width_percent:.0%}")
         info("OpenAI Key", "已设置" if config.has_openai() else "未设置")
+        if config.has_openai():
+            info("OpenAI URL", config.openai_base_url)
         info("代理", config.network_proxy or "未设置")
         info("TikTok cookies", config.tiktok_cookies_browser or "未设置")
         info("配置文件", config.config_file_path or "(无)")
 
         choice = choose("修改项", [
             "更改 ASR 引擎 / Whisper 模型",
-            "更改翻译引擎 / 模型",
+            "更改翻译引擎 / Ollama 模型",
             "更改 TTS 引擎 / 音色",
-            "更改字幕设置（样式/字号/高度/换行）",
-            "设置 OpenAI API Key",
+            "更改字幕设置（样式/字号/边距/换行）",
+            "OpenAI 配置（API Key / URL / 翻译模型 / 备选模型 / Whisper API）",
             "设置网络代理（YouTube 必需）",
             "设置 TikTok cookies 浏览器（绕过反爬）",
             "查看完整配置文件",
@@ -702,65 +704,13 @@ def interactive_config(config: Config):
         elif choice == 0:
             _config_asr(config)
         elif choice == 1:
-            idx = choose("翻译引擎", [
-                "openai (GPT, 需 Key)",
-                "ollama (本地免费, 需安装 Ollama)",
-                "google (免费, 国内可能不可用)",
-                "mymemory (免费, 国内可用, 有配额)",
-            ], default={"openai":0, "ollama":1, "google":2, "mymemory":3}.get(config.translate_engine, 0))
-            if idx is None:
-                pass  # 取消，不修改
-            else:
-                config.translate_engine = ["openai", "ollama", "google", "mymemory"][idx]
-                if config.translate_engine == "openai":
-                    new_model = input_with_default("翻译模型", config.translate_model)
-                    config.translate_model = new_model
-                elif config.translate_engine == "ollama":
-                    # 检查 Ollama 服务状态
-                    from modules.ollama_translator import is_ollama_running, list_installed_models, DEFAULT_OLLAMA_URL, RECOMMENDED_MODELS
-                    running = is_ollama_running(config.ollama_url)
-                    if running:
-                        success(f"Ollama 服务运行中: {config.ollama_url}")
-                        installed = list_installed_models(config.ollama_url)
-                        if installed:
-                            print(f"  {Color.DIM}已安装模型: {', '.join(installed)}{Color.RESET}")
-                            # 让用户选择已安装的模型或输入新模型名
-                            options = installed + ["输入其他模型名"]
-                            m_idx = choose("选择翻译模型", options, default=0)
-                            if m_idx is not None and m_idx < len(installed):
-                                config.ollama_model = installed[m_idx]
-                            elif m_idx is not None and m_idx == len(installed):
-                                new_model = input_with_default("模型名 (如 qwen2.5:7b)", config.ollama_model)
-                                config.ollama_model = new_model
-                        else:
-                            print(f"  {Color.YELLOW}⚠ 未安装任何模型{Color.RESET}")
-                            print(f"  {Color.DIM}推荐模型:{Color.RESET}")
-                            for name, desc in RECOMMENDED_MODELS[:5]:
-                                print(f"    {Color.CYAN}{name}{Color.RESET} - {desc}")
-                            new_model = input_with_default("模型名", config.ollama_model)
-                            config.ollama_model = new_model
-                            print(f"  {Color.DIM}安装: ollama pull {config.ollama_model}{Color.RESET}")
-                    else:
-                        warn(f"Ollama 服务未运行: {config.ollama_url}")
-                        print(f"  {Color.DIM}请先安装并启动 Ollama:{Color.RESET}")
-                        print(f"  {Color.DIM}  1. 下载: https://ollama.com{Color.RESET}")
-                        print(f"  {Color.DIM}  2. 启动: ollama serve{Color.RESET}")
-                        print(f"  {Color.DIM}  3. 拉模型: ollama pull qwen2.5:7b{Color.RESET}")
-                        new_model = input_with_default("模型名", config.ollama_model)
-                        config.ollama_model = new_model
-                success(f"已更改为 {config.translate_engine}" + (f" / {config.translate_model}" if config.translate_engine == "openai" else f" / {config.ollama_model}" if config.translate_engine == "ollama" else ""))
-                _save_config(config)
+            _config_translate(config)
         elif choice == 2:
             _config_tts(config)
         elif choice == 3:
             _config_subtitle(config)
         elif choice == 4:
-            print(f"\n{Color.DIM}当前: {config.openai_api_key[:8] + '...' if config.has_openai() else '未设置'}{Color.RESET}")
-            key = input(f"{Color.CYAN}输入 OpenAI API Key (留空跳过): {Color.RESET}").strip()
-            if key:
-                config.openai_api_key = key
-                success("API Key 已设置")
-                _save_config(config)
+            _config_openai(config)
         elif choice == 5:
             # 设置网络代理
             print(f"\n{Color.DIM}当前代理: {config.network_proxy or '未设置'}{Color.RESET}")
@@ -779,43 +729,31 @@ def interactive_config(config: Config):
                 success(f"代理已设置为: {proxy}")
                 _save_config(config)
         elif choice == 6:
-            # 设置 TikTok cookies 浏览器（绕过 TikTok 反爬）
-            print(f"\n{Color.DIM}当前 TikTok cookies 浏览器: {config.tiktok_cookies_browser or '未设置'}{Color.RESET}")
-            print(f"{Color.DIM}TikTok 反爬严格，经常报 \"Unable to extract universal data\"{Color.RESET}")
+            # 设置 TikTok cookies 浏览器（用上下键选择）
+            print(f"\n{Color.DIM}TikTok 反爬严格，经常报 \"Unable to extract universal data\"{Color.RESET}")
             print(f"{Color.DIM}解决方法：在浏览器中登录 https://www.tiktok.com 后，{Color.RESET}")
-            print(f"{Color.DIM}在此填写浏览器名，程序会自动提取 cookies 绕过反爬{Color.RESET}\n")
-            print(f"{Color.CYAN}支持的浏览器:{Color.RESET}")
+            print(f"{Color.DIM}选择对应浏览器，程序会自动提取 cookies 绕过反爬{Color.RESET}")
+
             browsers = ["chrome", "firefox", "edge", "brave", "opera", "safari"]
-            for i, b in enumerate(browsers):
+            options = []
+            for b in browsers:
                 marker = f" {Color.GREEN}← 当前{Color.RESET}" if b == config.tiktok_cookies_browser.lower() else ""
-                print(f"  {Color.DIM}{i+1}. {b}{marker}{Color.RESET}")
-            print(f"  {Color.DIM}0. 清除设置（不使用 cookies）{Color.RESET}")
-            print(f"  {Color.DIM}或直接输入浏览器名{Color.RESET}\n")
+                options.append(f"{b}{marker}")
+            options.append(f"清除设置（不使用 cookies）")
+            options.append("返回")
 
-            user_input = input(f"{Color.CYAN}选择浏览器 (0-6 或名称, 留空跳过): {Color.RESET}").strip()
-            if not user_input:
-                continue
-
-            new_browser = ""
-            if user_input == "0":
-                new_browser = ""
-            elif user_input.isdigit() and 1 <= int(user_input) <= len(browsers):
-                new_browser = browsers[int(user_input) - 1]
-            elif user_input.lower() in browsers:
-                new_browser = user_input.lower()
-            else:
-                warn(f"不支持的浏览器: {user_input}")
-                print(f"{Color.DIM}支持的: {', '.join(browsers)}{Color.RESET}")
-                pause()
-                continue
-
-            config.tiktok_cookies_browser = new_browser
-            if new_browser:
-                success(f"TikTok cookies 浏览器已设置为: {new_browser}")
-                print(f"{Color.DIM}请确保已在该浏览器中登录 https://www.tiktok.com{Color.RESET}")
-            else:
+            b_idx = choose("选择 TikTok cookies 浏览器", options, default=0)
+            if b_idx is None:
+                pass  # 取消
+            elif b_idx < len(browsers):
+                config.tiktok_cookies_browser = browsers[b_idx]
+                success(f"TikTok cookies 浏览器已设置为: {browsers[b_idx]}")
+                print(f"  {Color.DIM}请确保已在该浏览器中登录 https://www.tiktok.com{Color.RESET}")
+                _save_config(config)
+            elif b_idx == len(browsers):
+                config.tiktok_cookies_browser = ""
                 success("已清除 TikTok cookies 设置")
-            _save_config(config)
+                _save_config(config)
         elif choice == 7:
             if config.config_file_path and os.path.isfile(config.config_file_path):
                 print(f"\n{Color.HEADER}=== 配置文件内容 ==={Color.RESET}\n")
@@ -826,75 +764,271 @@ def interactive_config(config: Config):
             pause()
 
 
-def _config_asr(config: Config):
-    """ASR 引擎 + Whisper 模型配置"""
-    section("ASR 引擎配置")
-    info("当前引擎", config.asr_engine)
-    if config.asr_engine == "whisper-api":
-        info("Whisper 模型", config.whisper_model)
-    else:
-        info("faster-whisper 模型", config.faster_whisper_model)
+def _config_openai(config: Config):
+    """OpenAI 配置：API Key / Base URL / 翻译模型 / 备选模型 / ASR API 模型"""
+    last_choice = 0  # 记住上次选择，设置完不跳回"返回"
+    while True:
+        section("OpenAI 配置")
+        key_display = (config.openai_api_key[:8] + "..." + config.openai_api_key[-4:]) if config.has_openai() else "未设置"
+        info("API Key", key_display)
+        info("Base URL", config.openai_base_url)
+        info("翻译模型", config.translate_model)
+        info("备选模型", ", ".join(config.translate_model_fallbacks) if config.translate_model_fallbacks else "无")
+        info("ASR API 模型", config.whisper_model or "whisper-1")
 
-    sub = choose("ASR 选项", [
-        "切换 ASR 引擎",
-        "选择 faster-whisper 模型版本（本地，首次使用自动下载）",
-        "返回",
-    ], default=2)
+        sub = choose("OpenAI 选项", [
+            "设置 API Key",
+            "设置 API Base URL",
+            "设置翻译模型",
+            "设置备选翻译模型链",
+            "设置 ASR API 模型",
+            "返回",
+        ], default=last_choice)
 
-    if sub == 2 or sub is None:
-        return
-    elif sub == 0:
-        idx = choose("ASR 引擎", [
-            "whisper-api (OpenAI 云端, 需 Key, 速度快)",
-            "faster-whisper (本地免费, 首次需下载模型)",
-        ], default=0 if config.asr_engine == "whisper-api" else 1)
-        if idx is None:
-            pass  # 取消
-        else:
-            config.asr_engine = ["whisper-api", "faster-whisper"][idx]
-            success(f"ASR 引擎已更改为 {config.asr_engine}")
+        if sub is None or sub == 5:
+            return
+        last_choice = sub
+
+        if sub == 0:
+            print(f"\n{Color.DIM}当前: {key_display}{Color.RESET}")
+            print(f"{Color.DIM}支持 OpenAI 官方或第三方兼容 API{Color.RESET}")
+            key = input(f"{Color.CYAN}输入 API Key (留空跳过): {Color.RESET}").strip()
+            if key:
+                config.openai_api_key = key
+                success("API Key 已设置")
+                _save_config(config)
+        elif sub == 1:
+            print(f"\n{Color.DIM}当前: {config.openai_base_url}{Color.RESET}")
+            print(f"{Color.DIM}OpenAI 官方: https://api.openai.com/v1{Color.RESET}")
+            print(f"{Color.DIM}第三方兼容 API 示例:{Color.RESET}")
+            print(f"{Color.DIM}  DeepSeek: https://api.deepseek.com/v1{Color.RESET}")
+            print(f"{Color.DIM}  API2D:    https://oa.api2d.net/v1{Color.RESET}")
+            print(f"{Color.DIM}  OpenRouter: https://openrouter.ai/api/v1{Color.RESET}")
+            url = input_with_default("API Base URL", config.openai_base_url)
+            if url:
+                config.openai_base_url = url
+                success(f"Base URL 已设置为: {url}")
+                _save_config(config)
+        elif sub == 2:
+            print(f"\n{Color.DIM}当前: {config.translate_model}{Color.RESET}")
+            print(f"{Color.DIM}常见模型: gpt-4o-mini / gpt-4o / gpt-3.5-turbo / deepseek-chat{Color.RESET}")
+            model = input_with_default("翻译模型", config.translate_model)
+            if model:
+                config.translate_model = model
+                success(f"翻译模型已设为: {model}")
+                _save_config(config)
+        elif sub == 3:
+            print(f"\n{Color.DIM}当前备选模型链: {', '.join(config.translate_model_fallbacks) if config.translate_model_fallbacks else '无'}{Color.RESET}")
+            print(f"{Color.DIM}主模型失败时，按顺序尝试备选模型{Color.RESET}")
+            print(f"{Color.DIM}输入逗号分隔的模型名，如: gpt-4o-mini,gpt-3.5-turbo,gpt-4o{Color.RESET}")
+            raw = input_with_default("备选模型链（逗号分隔，留空清除）", ",".join(config.translate_model_fallbacks))
+            if raw.strip():
+                config.translate_model_fallbacks = [m.strip() for m in raw.split(",") if m.strip()]
+            else:
+                config.translate_model_fallbacks = []
+            success(f"备选模型链已设为: {', '.join(config.translate_model_fallbacks) or '无'}")
             _save_config(config)
-    elif sub == 1:
-        # faster-whisper 模型选择
-        models = [
-            ("tiny",    "39MB",  "最快, 精度最低, 适合快速预览"),
-            ("base",    "142MB", "较快, 精度一般, 推荐入门"),
-            ("small",   "466MB", "中等, 精度较好, 平衡选择"),
-            ("medium",  "1.5GB", "较慢, 精度高, 需 GPU 加速"),
-            ("large-v3","3GB",   "最慢, 精度最高, 强烈建议 GPU"),
-        ]
-        print(f"\n{Color.DIM}faster-whisper 模型版本（首次使用时自动从 HuggingFace 下载）:{Color.RESET}\n")
+        elif sub == 4:
+            print(f"\n{Color.DIM}当前: {config.whisper_model or 'whisper-1'}{Color.RESET}")
+            print(f"{Color.DIM}ASR API 模型（云端语音识别，需 ASR_ENGINE=whisper-api）{Color.RESET}")
+            print(f"{Color.DIM}默认使用 whisper-1{Color.RESET}")
+            model = input_with_default("ASR API 模型", config.whisper_model or "whisper-1")
+            if model:
+                config.whisper_model = model
+                success(f"ASR API 模型已设为: {model}")
+                _save_config(config)
+
+
+def _config_translate(config: Config):
+    """翻译引擎配置：切换引擎 + Ollama 模型选择"""
+    last_choice = 0
+    while True:
+        section("翻译引擎配置")
+        info("当前引擎", config.translate_engine)
+        if config.translate_engine == "openai":
+            info("翻译模型", config.translate_model)
+        elif config.translate_engine == "ollama":
+            info("Ollama 模型", config.ollama_model)
+            info("Ollama URL", config.ollama_url)
+
+        sub = choose("翻译选项", [
+            "切换翻译引擎",
+            "选择 Ollama 模型（列出本地已安装）" if config.translate_engine == "ollama" else "选择 Ollama 模型",
+            "设置 Ollama 服务地址",
+            "返回",
+        ], default=last_choice)
+
+        if sub is None or sub == 3:
+            return
+        last_choice = sub
+
+        if sub == 0:
+            idx = choose("翻译引擎", [
+                "openai (GPT, 需 Key)",
+                "ollama (本地免费, 需安装 Ollama)",
+                "google (免费, 国内可能不可用)",
+                "mymemory (免费, 国内可用, 有配额)",
+            ], default={"openai":0, "ollama":1, "google":2, "mymemory":3}.get(config.translate_engine, 0))
+            if idx is None:
+                pass  # 取消
+            else:
+                config.translate_engine = ["openai", "ollama", "google", "mymemory"][idx]
+                success(f"翻译引擎已更改为 {config.translate_engine}")
+                if config.translate_engine == "openai":
+                    print(f"  {Color.DIM}请在「OpenAI 配置」中设置 API Key 和模型{Color.RESET}")
+                elif config.translate_engine == "ollama":
+                    print(f"  {Color.DIM}请确保 Ollama 服务已启动{Color.RESET}")
+                _save_config(config)
+        elif sub == 1:
+            _config_ollama_model(config)
+        elif sub == 2:
+            url = input_with_default("Ollama 服务地址", config.ollama_url)
+            if url:
+                config.ollama_url = url
+                success(f"Ollama 服务地址已设为: {url}")
+                _save_config(config)
+
+
+def _config_ollama_model(config: Config):
+    """Ollama 模型选择：列出本地已安装模型供选择"""
+    from modules.ollama_translator import is_ollama_running, list_installed_models, RECOMMENDED_MODELS
+
+    running = is_ollama_running(config.ollama_url)
+    if not running:
+        warn(f"Ollama 服务未运行: {config.ollama_url}")
+        print(f"  {Color.DIM}请先安装并启动 Ollama:{Color.RESET}")
+        print(f"  {Color.DIM}  1. 下载: https://ollama.com{Color.RESET}")
+        print(f"  {Color.DIM}  2. 启动: ollama serve{Color.RESET}")
+        print(f"  {Color.DIM}  3. 拉模型: ollama pull qwen2.5:7b{Color.RESET}")
+        new_model = input_with_default("手动输入模型名", config.ollama_model)
+        if new_model:
+            config.ollama_model = new_model
+            success(f"Ollama 模型已设为: {new_model}")
+            _save_config(config)
+        return
+
+    success(f"Ollama 服务运行中: {config.ollama_url}")
+    installed = list_installed_models(config.ollama_url)
+
+    if installed:
+        print(f"  {Color.DIM}已安装 {len(installed)} 个模型{Color.RESET}")
         options = []
-        for name, size, desc in models:
-            current = f" {Color.GREEN}← 当前{Color.RESET}" if name == config.faster_whisper_model else ""
-            options.append(f"{name} ({size}) - {desc}{current}")
+        for m in installed:
+            marker = f" {Color.GREEN}← 当前{Color.RESET}" if m == config.ollama_model else ""
+            options.append(f"{m}{marker}")
+        options.append("手动输入其他模型名")
         options.append("返回")
 
-        m_idx = choose("选择模型", options, default=0)
-        if m_idx is not None and m_idx < len(models):
-            model_name = models[m_idx][0]
-            model_size = models[m_idx][1]
-            config.faster_whisper_model = model_name
-            success(f"faster-whisper 模型已设为: {model_name} ({model_size})")
-            print(f"  {Color.DIM}模型将在首次使用 faster-whisper 时自动下载到 .models/ 目录{Color.RESET}")
-            print(f"  {Color.DIM}国内建议配置代理以加速下载，或使用 HuggingFace 镜像（已内置）{Color.RESET}")
-
-            # 检查模型是否已下载
-            import os as _os
-            models_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), ".models")
-            model_dirs = [d for d in _os.listdir(models_dir) if d.startswith("models--")] if _os.path.isdir(models_dir) else []
-            expected = f"faster-whisper-{model_name}"
-            already = any(expected in d for d in model_dirs)
-            if already:
-                print(f"  {Color.GREEN}✓ 该模型已下载{Color.RESET}")
-            else:
-                print(f"  {Color.YELLOW}ⓘ 该模型尚未下载，将在首次使用时自动下载{Color.RESET}")
-                if confirm("现在预下载该模型?", default_yes=False):
-                    from modules.transcriber import pre_download_faster_whisper_model
-                    pre_download_faster_whisper_model(model_name, config)
-
+        m_idx = choose("选择 Ollama 模型", options, default=0)
+        if m_idx is None:
+            pass  # 取消
+        elif m_idx < len(installed):
+            config.ollama_model = installed[m_idx]
+            success(f"Ollama 模型已设为: {installed[m_idx]}")
             _save_config(config)
-        pause()
+        elif m_idx == len(installed):
+            new_model = input_with_default("模型名 (如 qwen2.5:7b)", config.ollama_model)
+            if new_model:
+                config.ollama_model = new_model
+                success(f"Ollama 模型已设为: {new_model}")
+                _save_config(config)
+    else:
+        print(f"  {Color.YELLOW}⚠ 未安装任何模型{Color.RESET}")
+        print(f"  {Color.DIM}推荐模型:{Color.RESET}")
+        for name, desc in RECOMMENDED_MODELS[:5]:
+            print(f"    {Color.CYAN}{name}{Color.RESET} - {desc}")
+        print(f"  {Color.DIM}安装命令: ollama pull <模型名>{Color.RESET}")
+        new_model = input_with_default("输入要使用的模型名", config.ollama_model)
+        if new_model:
+            config.ollama_model = new_model
+            success(f"Ollama 模型已设为: {new_model}")
+            print(f"  {Color.DIM}如未安装，请运行: ollama pull {new_model}{Color.RESET}")
+            _save_config(config)
+
+
+def _config_asr(config: Config):
+    """ASR 引擎 + Whisper 模型配置"""
+    last_choice = 0
+    while True:
+        section("ASR 引擎配置")
+        info("当前引擎", config.asr_engine)
+        if config.asr_engine == "whisper-api":
+            info("ASR API 模型", config.whisper_model or "whisper-1")
+        else:
+            info("faster-whisper 模型", config.faster_whisper_model)
+
+        sub = choose("ASR 选项", [
+            "切换 ASR 引擎",
+            "选择 faster-whisper 模型版本（本地，首次使用自动下载）",
+            "返回",
+        ], default=last_choice)
+
+        if sub is None or sub == 2:
+            return
+        last_choice = sub
+
+        if sub == 0:
+            idx = choose("ASR 引擎", [
+                "whisper-api (OpenAI 云端, 需 Key, 速度快)",
+                "faster-whisper (本地免费, 首次需下载模型)",
+            ], default=0 if config.asr_engine == "whisper-api" else 1)
+            if idx is None:
+                pass  # 取消
+            else:
+                config.asr_engine = ["whisper-api", "faster-whisper"][idx]
+                success(f"ASR 引擎已更改为 {config.asr_engine}")
+                _save_config(config)
+        elif sub == 1:
+            # faster-whisper 模型选择
+            models = [
+                ("tiny",    "39MB",  "最快, 精度最低, 适合快速预览"),
+                ("base",    "142MB", "较快, 精度一般, 推荐入门"),
+                ("small",   "466MB", "中等, 精度较好, 平衡选择"),
+                ("medium",  "1.5GB", "较慢, 精度高, 需 GPU 加速"),
+                ("large-v3","3GB",   "最慢, 精度最高, 强烈建议 GPU"),
+            ]
+            print(f"\n{Color.DIM}faster-whisper 模型版本（首次使用时自动从 HuggingFace 下载）:{Color.RESET}\n")
+            options = []
+            for name, size, desc in models:
+                current = f" {Color.GREEN}← 当前{Color.RESET}" if name == config.faster_whisper_model else ""
+                options.append(f"{name} ({size}) - {desc}{current}")
+            options.append("返回")
+
+            # 找到当前模型在列表中的位置作为默认选中
+            default_idx = 0
+            for i, (name, _, _) in enumerate(models):
+                if name == config.faster_whisper_model:
+                    default_idx = i
+                    break
+
+            m_idx = choose("选择模型", options, default=default_idx)
+            if m_idx is None or m_idx == len(models):
+                pass  # 取消或返回
+            elif m_idx < len(models):
+                model_name = models[m_idx][0]
+                model_size = models[m_idx][1]
+                config.faster_whisper_model = model_name
+                success(f"faster-whisper 模型已设为: {model_name} ({model_size})")
+                print(f"  {Color.DIM}模型将在首次使用 faster-whisper 时自动下载到 .models/ 目录{Color.RESET}")
+                print(f"  {Color.DIM}国内建议配置代理以加速下载，或使用 HuggingFace 镜像（已内置）{Color.RESET}")
+
+                # 检查模型是否已下载
+                import os as _os
+                models_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), ".models")
+                # HuggingFace 实际目录格式: models--Systran--faster-whisper-{model_name}
+                model_dirs = [d for d in _os.listdir(models_dir) if d.startswith("models--")] if _os.path.isdir(models_dir) else []
+                # 用模型名后缀匹配，兼容不同组织前缀（Systran / 其他）
+                expected_suffix = f"faster-whisper-{model_name}"
+                already = any(expected_suffix in d for d in model_dirs)
+                if already:
+                    print(f"  {Color.GREEN}✓ 该模型已下载{Color.RESET}")
+                else:
+                    print(f"  {Color.YELLOW}ⓘ 该模型尚未下载，将在首次使用时自动下载{Color.RESET}")
+                    if confirm("现在预下载该模型?", default_yes=False):
+                        from modules.transcriber import pre_download_faster_whisper_model
+                        pre_download_faster_whisper_model(model_name, config)
+
+                _save_config(config)
 
 
 # edge-tts 常用音色列表
@@ -928,77 +1062,88 @@ EDGE_TTS_VOICES = {
 
 def _config_tts(config: Config):
     """TTS 引擎 + 音色配置"""
-    section("TTS 配音配置")
-    info("当前引擎", config.tts_engine)
-    info("中文音色", f"{config.tts_voice_zh}")
-    info("英文音色", f"{config.tts_voice_en}")
-    info("日文音色", f"{config.tts_voice_ja}")
-    info("韩文音色", f"{config.tts_voice_ko}")
-    info("语速", config.tts_rate)
-    info("音量", config.tts_volume)
+    last_choice = 0
+    while True:
+        section("TTS 配音配置")
+        info("当前引擎", config.tts_engine)
+        info("中文音色", f"{config.tts_voice_zh}")
+        info("英文音色", f"{config.tts_voice_en}")
+        info("日文音色", f"{config.tts_voice_ja}")
+        info("韩文音色", f"{config.tts_voice_ko}")
+        info("语速", config.tts_rate)
+        info("音量", config.tts_volume)
 
-    sub = choose("TTS 选项", [
-        "切换 TTS 引擎",
-        "选择中文音色",
-        "选择英文音色",
-        "选择日文音色",
-        "选择韩文音色",
-        "调整语速 / 音量",
-        "返回",
-    ], default=6)
+        sub = choose("TTS 选项", [
+            "切换 TTS 引擎",
+            "选择中文音色",
+            "选择英文音色",
+            "选择日文音色",
+            "选择韩文音色",
+            "调整语速 / 音量",
+            "返回",
+        ], default=last_choice)
 
-    if sub == 6 or sub is None:
-        return
-    elif sub == 0:
-        idx = choose("TTS 引擎", [
-            "edge (免费, 微软在线)",
-            "azure (需 Key, 质量更好)",
-        ], default={"edge":0, "azure":1}.get(config.tts_engine, 0))
-        if idx is None:
-            pass  # 取消
-        else:
-            config.tts_engine = ["edge", "azure"][idx]
-            success(f"TTS 引擎已更改为 {config.tts_engine}")
-            _save_config(config)
-    elif 1 <= sub <= 4:
-        lang_map = {1: ("zh", "tts_voice_zh", "中文"),
-                    2: ("en", "tts_voice_en", "英文"),
-                    3: ("ja", "tts_voice_ja", "日文"),
-                    4: ("ko", "tts_voice_ko", "韩文")}
-        lang_code, attr_name, lang_label = lang_map[sub]
-        voices = EDGE_TTS_VOICES.get(lang_code, [])
-        current_voice = getattr(config, attr_name)
-        options = []
-        for vid, vdesc in voices:
-            marker = f" {Color.GREEN}← 当前{Color.RESET}" if vid == current_voice else ""
-            options.append(f"{vid} - {vdesc}{marker}")
-        options.append("手动输入音色 ID")
-        options.append("返回")
+        if sub is None or sub == 6:
+            return
+        last_choice = sub
 
-        v_idx = choose(f"选择{lang_label}音色", options, default=0)
-        if v_idx is not None and v_idx < len(voices):
-            setattr(config, attr_name, voices[v_idx][0])
-            success(f"{lang_label}音色已设为: {voices[v_idx][0]}")
-            _save_config(config)
-        elif v_idx is not None and v_idx == len(voices):
-            # 手动输入
-            vid = input_with_default(f"输入{lang_label}音色 ID", current_voice)
-            if vid:
-                setattr(config, attr_name, vid)
-                success(f"{lang_label}音色已设为: {vid}")
+        if sub == 0:
+            idx = choose("TTS 引擎", [
+                "edge (免费, 微软在线)",
+                "azure (需 Key, 质量更好)",
+            ], default={"edge":0, "azure":1}.get(config.tts_engine, 0))
+            if idx is None:
+                pass  # 取消
+            else:
+                config.tts_engine = ["edge", "azure"][idx]
+                success(f"TTS 引擎已更改为 {config.tts_engine}")
                 _save_config(config)
-    elif sub == 5:
-        # 语速和音量
-        rate = input_with_default("语速 (如 +0% / +10% / -10%)", config.tts_rate)
-        config.tts_rate = rate
-        volume = input_with_default("音量 (如 +0% / +10% / -10%)", config.tts_volume)
-        config.tts_volume = volume
-        success(f"语速={rate}, 音量={volume}")
-        _save_config(config)
+        elif 1 <= sub <= 4:
+            lang_map = {1: ("zh", "tts_voice_zh", "中文"),
+                        2: ("en", "tts_voice_en", "英文"),
+                        3: ("ja", "tts_voice_ja", "日文"),
+                        4: ("ko", "tts_voice_ko", "韩文")}
+            lang_code, attr_name, lang_label = lang_map[sub]
+            voices = EDGE_TTS_VOICES.get(lang_code, [])
+            current_voice = getattr(config, attr_name)
+            options = []
+            # 找到当前音色在列表中的位置
+            default_idx = 0
+            for i, (vid, vdesc) in enumerate(voices):
+                marker = f" {Color.GREEN}← 当前{Color.RESET}" if vid == current_voice else ""
+                options.append(f"{vid} - {vdesc}{marker}")
+                if vid == current_voice:
+                    default_idx = i
+            options.append("手动输入音色 ID")
+            options.append("返回")
+
+            v_idx = choose(f"选择{lang_label}音色", options, default=default_idx)
+            if v_idx is None or v_idx == len(voices) + 1:
+                pass  # 取消或返回
+            elif v_idx < len(voices):
+                setattr(config, attr_name, voices[v_idx][0])
+                success(f"{lang_label}音色已设为: {voices[v_idx][0]}")
+                _save_config(config)
+            elif v_idx == len(voices):
+                # 手动输入
+                vid = input_with_default(f"输入{lang_label}音色 ID", current_voice)
+                if vid:
+                    setattr(config, attr_name, vid)
+                    success(f"{lang_label}音色已设为: {vid}")
+                    _save_config(config)
+        elif sub == 5:
+            # 语速和音量
+            rate = input_with_default("语速 (如 +0% / +10% / -10%)", config.tts_rate)
+            config.tts_rate = rate
+            volume = input_with_default("音量 (如 +0% / +10% / -10%)", config.tts_volume)
+            config.tts_volume = volume
+            success(f"语速={rate}, 音量={volume}")
+            _save_config(config)
 
 
 def _config_subtitle(config: Config):
     """字幕配置：样式/字号/边距/换行/颜色"""
+    last_choice = 0
     while True:
         section("字幕设置")
         info("样式", f"{config.subtitle_style} ({'双语' if config.subtitle_style == 'dual' else '仅目标语言'})")
@@ -1016,11 +1161,13 @@ def _config_subtitle(config: Config):
             "最大行数",
             "字体",
             "返回",
-        ], default=6)
+        ], default=last_choice)
 
-        if sub == 6 or sub is None:
+        if sub is None or sub == 6:
             return
-        elif sub == 0:
+        last_choice = sub
+
+        if sub == 0:
             idx = choose("字幕样式", ["single (仅目标语言)", "dual (双语: 原文+译文)"],
                          default=0 if config.subtitle_style == "single" else 1)
             if idx is None:
