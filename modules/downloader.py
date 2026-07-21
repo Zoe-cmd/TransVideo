@@ -99,7 +99,7 @@ class VideoDownloader:
         if self.is_douyin_link(source):
             print("[downloader] 检测到抖音链接，开始解析...")
             info = self.douyin_parser.parse(source)
-            safe_title = re.sub(r'[\\/:*?"<>|\n\r]', '_', info.desc[:40])
+            safe_title = re.sub(r'[\\/:*?"<>|\n\r\']', '_', info.desc[:40])
             filename = f"{safe_title}_{info.aweme_id}.mp4"
             output_path = os.path.join(out_dir, filename)
             self.douyin_parser.download_video(info, output_path)
@@ -136,7 +136,7 @@ class VideoDownloader:
                 raise RuntimeError(f"TikTok 解析失败: {e}")
 
             # 生成安全文件名（TikTok 标题可能很长且含很多标签）
-            safe_title = re.sub(r'[\\/:*?"<>|\n\r#]', '_', yt_info.title[:40])
+            safe_title = re.sub(r'[\\/:*?"<>|\n\r#\']', '_', yt_info.title[:40])
             video_id = yt_info.video_id or ""
             filename = f"{safe_title}_{video_id}.mp4" if video_id else f"{safe_title}.mp4"
             # 限制文件名长度（Windows 路径长度限制）
@@ -181,8 +181,8 @@ class VideoDownloader:
                     print(f"[downloader] {Color.DIM}解决方法：在 .env 中设置 NETWORK_PROXY{Color.RESET}")
                 raise RuntimeError(f"YouTube 解析失败: {e}")
 
-            # 生成安全文件名
-            safe_title = re.sub(r'[\\/:*?"<>|\n\r]', '_', yt_info.title[:40])
+            # 生成安全文件名（单引号 ' 会导致 ffmpeg 路径解析失败，需一并替换）
+            safe_title = re.sub(r'[\\/:*?"<>|\n\r\']', '_', yt_info.title[:40])
             video_id = yt_info.video_id or ""
             filename = f"{safe_title}_{video_id}.mp4" if video_id else f"{safe_title}.mp4"
             output_path = os.path.join(out_dir, filename)

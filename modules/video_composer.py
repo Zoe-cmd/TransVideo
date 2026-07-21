@@ -30,6 +30,65 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
+# GPU 编码器检测缓存（只检测一次）
+_gpu_encoder_cache = None
+
+
+def _detect_gpu_encoder(ffmpeg_path: str) -> str:
+    """检测可用的 GPU 视频编码器
+
+    检测顺序：NVIDIA NVENC > Intel QSV > AMD AMF > 回退 CPU libx264
+    返回编码器名称，如 "h264_nvenc" 或 "libx264"
+    """
+    global _gpu_encoder_cache
+    if _gpu_encoder_cache is not None:
+        return _gpu_encoder_cache
+
+    # 候选 GPU 编码器（按优先级）
+    candidates = [
+        ("h264_nvenc", "NVIDIA NVENC"),
+        ("h264_qsv",   "Intel QuickSync"),
+        ("h264_amf",   "AMD AMF"),
+    ]
+
+    for encoder, label in candidates:
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-encoders"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=10,
+            )
+            if encoder in result.stdout:
+                _gpu_encoder_cache = encoder
+                print(f"[compose] GPU 编码器: {label} ({encoder})")
+                return encoder
+        except Exception:
+            continue
+
+    # 回退到 CPU
+    _gpu_encoder_cache = "libx264"
+    print(f"[compose] 未检测到 GPU 编码器，使用 CPU (libx264)")
+    return _gpu_encoder_cache
+
+
+def _get_encoder_params(ffmpeg_path: str) -> list:
+    """获取视频编码器参数
+
+    GPU (NVENC): -c:v h264_nvenc -preset p4 -cq 21
+    GPU (QSV):   -c:v h264_qsv -preset fast -global_quality 21
+    CPU:         -c:v libx264 -preset fast -crf 21
+    """
+    encoder = _detect_gpu_encoder(ffmpeg_path)
+
+    if encoder == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21"]
+    elif encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "fast", "-global_quality", "21"]
+    elif encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-quality", "balanced", "-qp_i", "21", "-qp_p", "21"]
+    else:
+        return ["-c:v", "libx264", "-preset", "fast", "-crf", "21"]
+
 
 class VideoComposer:
     """视频合成器"""
@@ -412,9 +471,8 @@ class VideoComposer:
             "-i", video_path,
             "-vf", f"ass={sub_filter}",
             "-map", "0:v", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+            *_get_encoder_params(self.config.ffmpeg_path),
             "-c:a", "copy",
-            "-threads", "2",           # 限制线程数，避免内存爆炸
             "-max_muxing_queue_size", "1024",
             temp_video,
         ]
@@ -496,10 +554,9 @@ class VideoComposer:
                 "-i", audio_path,
                 "-filter_complex", filter_complex,
                 "-map", "[v_out]", "-map", "[a_mix]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+                *_get_encoder_params(self.config.ffmpeg_path),
                 "-c:a", "aac", "-b:a", "192k",
                 "-shortest",
-                "-threads", "2",
                 "-max_muxing_queue_size", "1024",
                 output_path,
             ]
@@ -510,10 +567,9 @@ class VideoComposer:
                 "-i", audio_path,
                 "-vf", f"ass={sub_filter}",
                 "-map", "0:v", "-map", "1:a",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+                *_get_encoder_params(self.config.ffmpeg_path),
                 "-c:a", "aac", "-b:a", "192k",
                 "-shortest",
-                "-threads", "2",
                 "-max_muxing_queue_size", "1024",
                 output_path,
             ]
@@ -555,9 +611,8 @@ class VideoComposer:
             self.config.ffmpeg_path, "-y",
             "-i", video_path,
             "-vf", f"ass={sub_filter}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+            *_get_encoder_params(self.config.ffmpeg_path),
             "-c:a", "copy",
-            "-threads", "2",                  # 限制线程数，避免长视频内存崩溃
             "-max_muxing_queue_size", "1024",
             output_path,
         ]

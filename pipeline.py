@@ -99,7 +99,8 @@ class TranslationPipeline:
         - 保留名: CON, PRN, AUX, NUL, COM1-9, LPT1-9
         """
         # 1. 替换非法字符为下划线
-        for ch in ' /\\:*?"<>|':
+        #    注意：单引号 ' 虽然在 Windows 文件系统合法，但会导致 ffmpeg 路径解析失败
+        for ch in " /\\:*?\"<>|'":
             name = name.replace(ch, "_")
         # 2. 替换控制字符
         name = "".join(c if c.isprintable() else "_" for c in name)
