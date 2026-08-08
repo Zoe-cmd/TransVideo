@@ -59,7 +59,7 @@ ENV_TEMPLATE = """# ============================================================
 ASR_ENGINE=faster-whisper
 # 翻译: openai (GPT, 需Key) / ollama (本地免费) / google (免费) / mymemory (免费)
 TRANSLATE_ENGINE=openai
-# TTS: edge (免费) / azure (需Key, 质量更好)
+# TTS: edge (免费) / azure (需Key, 质量更好) / index (本地GPU, 保留情感)
 TTS_ENGINE=edge
 
 # ----- 路径 -----
@@ -95,6 +95,13 @@ TTS_VOICE_JA=ja-JP-KeitaNeural
 TTS_VOICE_KO=ko-KR-InJoonNeural
 TTS_RATE=+0%
 TTS_VOLUME=+0%
+
+# ----- IndexTTS 2 (本地 GPU, 保留源音频情感, 需首次搭建环境) -----
+INDEX_TTS_MODEL_DIR=index-tts/checkpoints
+INDEX_TTS_REF_AUDIO=
+INDEX_TTS_USE_FP16=true
+INDEX_TTS_USE_DEEPSPEED=false
+INDEX_TTS_USE_ACCEL=false
 
 # ----- 字幕配置 (黑底白字 YouTube 风格) -----
 SUBTITLE_STYLE=single
@@ -163,6 +170,13 @@ class Config:
     tts_voice_ko: str = "ko-KR-InJoonNeural"
     tts_rate: str = "+0%"
     tts_volume: str = "+0%"
+
+    # ===== IndexTTS 2 =====
+    index_tts_model_dir: str = "index-tts/checkpoints"
+    index_tts_ref_audio: str = ""
+    index_tts_use_fp16: bool = True
+    index_tts_use_deepspeed: bool = False
+    index_tts_use_accel: bool = False
 
     # ===== 字幕 =====
     subtitle_style: str = "single"
@@ -250,6 +264,12 @@ _ENV_KEY_MAP = {
     "tts_voice_ko":            ("TTS_VOICE_KO", str),
     "tts_rate":                ("TTS_RATE", str),
     "tts_volume":              ("TTS_VOLUME", str),
+    # IndexTTS 2
+    "index_tts_model_dir":     ("INDEX_TTS_MODEL_DIR", str),
+    "index_tts_ref_audio":     ("INDEX_TTS_REF_AUDIO", str),
+    "index_tts_use_fp16":      ("INDEX_TTS_USE_FP16", bool),
+    "index_tts_use_deepspeed": ("INDEX_TTS_USE_DEEPSPEED", bool),
+    "index_tts_use_accel":     ("INDEX_TTS_USE_ACCEL", bool),
     # 字幕
     "subtitle_style":          ("SUBTITLE_STYLE", str),
     "subtitle_font":           ("SUBTITLE_FONT", str),

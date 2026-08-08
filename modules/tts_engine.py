@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""TTS 配音模块 —— 支持 edge-tts（免费）和 Azure TTS
+"""TTS 配音模块 —— 支持 edge-tts（免费）、Azure TTS 和 IndexTTS 2（本地 GPU）
 
 配音策略：
   - 每个片段生成独立音频文件
   - 记录 TTS 实际时长，用于后续对齐
   - 如果 TTS 时长 > 原片段时长，需要标记（合成时变速或留白处理）
+
+IndexTTS 2 通过子进程桥接调用（index_tts_worker.py），
+使用 index-tts 项目自己的 .venv 环境，与主程序依赖完全隔离。
 """
 
 import os
@@ -85,6 +88,22 @@ def _should_skip_text(text: str) -> bool:
         return True
     text_upper = text.upper()
     return any(p in text_upper for p in SKIP_TEXT_PATTERNS)
+
+
+def _get_audio_duration(ffprobe_path: str, audio_path: str) -> float:
+    """用 ffprobe 获取音频时长（秒）"""
+    cmd = [
+        ffprobe_path,
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        audio_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, IndexError):
+        return 0.0
 
 
 class EdgeTTSEngine:
@@ -177,19 +196,8 @@ class EdgeTTSEngine:
             os.environ.update(saved_env)
 
     def _get_audio_duration(self, audio_path: str) -> float:
-        """用 ffprobe 获取音频时长"""
-        cmd = [
-            self.config.ffprobe_path,
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        try:
-            return float(result.stdout.strip())
-        except (ValueError, IndexError):
-            return 0.0
+        """用 ffprobe 获取音频时长（委托给模块级函数）"""
+        return _get_audio_duration(self.config.ffprobe_path, audio_path)
 
     # 需要跳过的错误/警告文本模式（已提取为模块级常量，此处保留别名以兼容旧代码）
     SKIP_TEXT_PATTERNS = SKIP_TEXT_PATTERNS
@@ -321,8 +329,208 @@ class AzureTTSEngine:
             return frames / rate
 
 
+class IndexTTSEngine:
+    """IndexTTS 2 本地 GPU 配音（零样本声音克隆 + 保留源音频情感）
+
+    工作方式：
+      - 主程序与 index-tts 使用两个独立的 Python 环境（index-tts 要求 Python 3.10/3.11
+        且依赖重），所以通过子进程桥接：把合成任务写成 JSON，交给
+        index_tts_worker.py 在 index-tts/.venv 中批量执行。
+      - 每个片段默认用「原视频中该片段对应的原声切片」同时作为音色参考
+        （spk_audio_prompt）和情感参考（emo_audio_prompt），实现克隆说话人
+        音色并保留原始情感。
+      - 也可在 .env 中配置 INDEX_TTS_REF_AUDIO 指定固定的参考音频。
+    """
+
+    # index-tts 仓库相对项目根目录的默认位置
+    DEFAULT_REPO_DIR = "index-tts"
+    # 参考切片最长时长（秒），过长的参考不会带来更好效果还更慢
+    MAX_REF_DURATION = 15.0
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.repo_dir = os.path.join(self.project_root, self.DEFAULT_REPO_DIR)
+        self.python_path = self._find_index_python()
+        model_dir = config.index_tts_model_dir
+        if not os.path.isabs(model_dir):
+            model_dir = os.path.join(self.project_root, model_dir)
+        # 中文等非 ASCII 路径转 ASCII junction（sentencepiece 等 C++ 扩展 fopen 中文路径会失败）
+        from modules.indextts_setup import ascii_alias
+        self.model_dir = ascii_alias(model_dir)
+        self.worker_path = os.path.join(self.project_root, "index_tts_worker.py")
+
+        # 初始化时就把环境问题全部暴露出来，避免逐条失败
+        if not os.path.isfile(self.python_path):
+            raise RuntimeError(
+                f"未找到 index-tts 的 Python 环境: {self.python_path}\n"
+                "请运行自动安装脚本:\n"
+                "  python scripts/setup_indextts.py\n"
+                "或在 CLI 交互界面「TTS 配音配置 → 安装 / 检测 IndexTTS 环境」一键安装"
+            )
+        if not os.path.isfile(os.path.join(self.model_dir, "config.yaml")):
+            raise RuntimeError(
+                f"IndexTTS-2 模型文件不完整: {self.model_dir}\n"
+                "请运行自动安装脚本下载模型权重（约 5GB）:\n"
+                "  python scripts/setup_indextts.py"
+            )
+
+    def _find_index_python(self) -> str:
+        """定位 index-tts 虚拟环境中的 Python 解释器
+
+        路径逻辑与 modules/indextts_setup.venv_dir 保持一致：
+        项目路径含中文等非 ASCII 字符时，venv 在外部纯 ASCII 目录
+        （kaldifst 等 C++ 扩展 fopen 中文路径会失败）。
+        """
+        from modules.indextts_setup import index_python
+        return index_python()
+
+    def _find_original_audio(self, output_dir: str) -> str:
+        """查找流水线提取的原始音频（work_dir 下的 *_audio.wav）
+
+        output_dir 是 work_dir/tts，原始音频在其上一级目录。
+        """
+        import glob
+        work_dir = os.path.dirname(os.path.abspath(output_dir))
+        candidates = glob.glob(os.path.join(work_dir, "*_audio.wav"))
+        return candidates[0] if candidates else ""
+
+    def _slice_ref_audio(self, src_audio: str, start: float, end: float, out_path: str) -> bool:
+        """用 ffmpeg 从原始音频切出 [start, end] 片段作为参考音频"""
+        duration = min(max(end - start, 0.5), self.MAX_REF_DURATION)
+        cmd = [
+            self.config.ffmpeg_path, "-y", "-v", "error",
+            "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
+            "-i", src_audio,
+            "-ac", "1", "-ar", "22050",
+            out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        return result.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 100
+
+    def synthesize(self, segments: List[Segment], target_lang: str, output_dir: str) -> List[TTSResult]:
+        import json
+
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        # 防御性清理：删除旧的 TTS 文件，避免跳过片段复用旧音频
+        _clean_old_tts_files(output_dir)
+
+        # 确定参考音频来源
+        fixed_ref = self.config.index_tts_ref_audio
+        original_audio = "" if fixed_ref else self._find_original_audio(output_dir)
+        if fixed_ref:
+            print(f"[tts] IndexTTS 2 配音: 使用固定参考音频 {fixed_ref}")
+        elif original_audio:
+            print(f"[tts] IndexTTS 2 配音: 逐片段克隆原声（{os.path.basename(original_audio)}），保留情感")
+        else:
+            raise RuntimeError(
+                "IndexTTS 需要参考音频：未找到原始音频切片来源。\n"
+                "请在 .env 中设置 INDEX_TTS_REF_AUDIO 指向一段 3-15 秒的清晰人声音频。"
+            )
+
+        # 构建任务清单
+        ref_dir = os.path.join(output_dir, "refs")
+        Path(ref_dir).mkdir(parents=True, exist_ok=True)
+        items = []
+        seg_map = {}
+        skipped = 0
+        for i, seg in enumerate(segments):
+            text = seg.translated_text or seg.text
+            if _should_skip_text(text):
+                skipped += 1
+                continue
+            audio_path = os.path.join(output_dir, f"tts_{i:05d}.wav")
+            # 每个片段用对应原声切片做参考（克隆音色 + 保留情感）
+            if fixed_ref:
+                ref_audio = fixed_ref
+            else:
+                ref_audio = os.path.join(ref_dir, f"ref_{i:05d}.wav")
+                if not os.path.isfile(ref_audio):
+                    if not self._slice_ref_audio(original_audio, seg.start, seg.end, ref_audio):
+                        # 切片失败（如时间戳越界），退化为整段原声
+                        ref_audio = original_audio
+            items.append({
+                "index": i,
+                "text": text,
+                "ref_audio": os.path.abspath(ref_audio),
+                "emo_audio": os.path.abspath(ref_audio),  # 情感参考与音色参考一致 → 保留原情感
+                "output_path": os.path.abspath(audio_path),
+            })
+            seg_map[i] = seg
+
+        if skipped > 0:
+            print(f"[tts] 跳过 {skipped} 个无效文本片段")
+        if not items:
+            print("[tts] 没有需要合成的片段")
+            return []
+
+        print(f"[tts] IndexTTS 2 批量合成 {len(items)} 个片段（子进程: {os.path.basename(self.repo_dir)}/.venv）")
+
+        job_path = os.path.join(output_dir, "_index_tts_job.json")
+        result_path = os.path.join(output_dir, "_index_tts_result.json")
+        job = {
+            "model_dir": os.path.abspath(self.model_dir),
+            "use_fp16": self.config.index_tts_use_fp16,
+            "use_deepspeed": self.config.index_tts_use_deepspeed,
+            "use_accel": self.config.index_tts_use_accel,
+            "items": items,
+            "result_path": os.path.abspath(result_path),
+        }
+        with open(job_path, "w", encoding="utf-8") as f:
+            json.dump(job, f, ensure_ascii=False, indent=1)
+
+        # 子进程环境：国内访问 HuggingFace 慢时自动走镜像（首次运行需下载小模型）
+        env = os.environ.copy()
+        env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        # 中文路径 / 中文控制台下避免编码问题
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        proc = subprocess.run(
+            [self.python_path, self.worker_path, os.path.abspath(job_path)],
+            cwd=self.repo_dir,
+            env=env,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"IndexTTS worker 异常退出（code={proc.returncode}），详见上方日志")
+        if not os.path.isfile(result_path):
+            raise RuntimeError("IndexTTS worker 未生成结果文件，详见上方日志")
+
+        with open(result_path, "r", encoding="utf-8") as f:
+            worker_results = {r["index"]: r for r in json.load(f)}
+
+        results = []
+        failed = 0
+        for item in items:
+            i = item["index"]
+            wr = worker_results.get(i, {})
+            audio_path = item["output_path"]
+            if wr.get("ok") and os.path.isfile(audio_path) and os.path.getsize(audio_path) > 100:
+                duration = _get_audio_duration(self.config.ffprobe_path, audio_path)
+                seg = seg_map[i]
+                results.append(TTSResult(
+                    index=i,
+                    audio_path=audio_path,
+                    start=seg.start,
+                    end=seg.end,
+                    tts_duration=duration,
+                    text=item["text"],
+                ))
+            else:
+                failed += 1
+                print(f"[tts]   片段 {i+1} 合成失败: {wr.get('error', '未知')[:80]}")
+
+        if failed > 0:
+            print(f"[tts] ⚠ {failed} 个片段合成失败（将用静音填充）")
+        print(f"[tts] 配音完成: 成功 {len(results)}/{len(segments)} 个音频")
+        return results
+
+
 def create_tts_engine(config: Config):
     """工厂函数：根据 config.tts_engine 选择 TTS 引擎"""
+    if config.tts_engine == "index":
+        return IndexTTSEngine(config)
     if config.tts_engine == "azure" and config.azure_speech_key:
         return AzureTTSEngine(config)
     # 默认 edge-tts

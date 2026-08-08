@@ -35,6 +35,13 @@ from modules.keyboard_ui import (
 # 启用 Windows VT100 颜色支持（必须在第一次输出前调用）
 enable_vt100()
 
+# Windows GBK 控制台 / 管道输出下避免 UnicodeEncodeError（⚙ 等字符无法编码为 GBK）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import re as _re
 import unicodedata as _uc
 
@@ -1023,8 +1030,8 @@ def _config_asr(config: Config):
                 if already:
                     print(f"  {Color.GREEN}✓ 该模型已下载{Color.RESET}")
                 else:
-                    print(f"  {Color.YELLOW}ⓘ 该模型尚未下载，将在首次使用时自动下载{Color.RESET}")
-                    if confirm("现在预下载该模型?", default_yes=False):
+                    print(f"  {Color.YELLOW}ⓘ 该模型尚未下载{Color.RESET}")
+                    if confirm("现在下载该模型? (进度实时显示)", default_yes=True):
                         from modules.transcriber import pre_download_faster_whisper_model
                         pre_download_faster_whisper_model(model_name, config)
 
@@ -1080,10 +1087,11 @@ def _config_tts(config: Config):
             "选择日文音色",
             "选择韩文音色",
             "调整语速 / 音量",
+            "安装 / 检测 IndexTTS 环境",
             "返回",
         ], default=last_choice)
 
-        if sub is None or sub == 6:
+        if sub is None or sub == 7:
             return
         last_choice = sub
 
@@ -1091,13 +1099,16 @@ def _config_tts(config: Config):
             idx = choose("TTS 引擎", [
                 "edge (免费, 微软在线)",
                 "azure (需 Key, 质量更好)",
-            ], default={"edge":0, "azure":1}.get(config.tts_engine, 0))
+                "index (本地 GPU, IndexTTS 2, 克隆原声并保留情感)",
+            ], default={"edge":0, "azure":1, "index":2}.get(config.tts_engine, 0))
             if idx is None:
                 pass  # 取消
             else:
-                config.tts_engine = ["edge", "azure"][idx]
+                config.tts_engine = ["edge", "azure", "index"][idx]
                 success(f"TTS 引擎已更改为 {config.tts_engine}")
                 _save_config(config)
+                if config.tts_engine == "index":
+                    _maybe_install_indextts()
         elif 1 <= sub <= 4:
             lang_map = {1: ("zh", "tts_voice_zh", "中文"),
                         2: ("en", "tts_voice_en", "英文"),
@@ -1139,6 +1150,39 @@ def _config_tts(config: Config):
             config.tts_volume = volume
             success(f"语速={rate}, 音量={volume}")
             _save_config(config)
+        elif sub == 6:
+            _maybe_install_indextts(force_prompt=True)
+
+
+def _maybe_install_indextts(force_prompt: bool = False):
+    """检测 IndexTTS 2 环境，未就绪时提供一键自动安装
+
+    force_prompt=True 时（从菜单主动进入）即使已就绪也显示状态。
+    """
+    from modules.indextts_setup import indextts_status, install_indextts
+
+    ready, detail = indextts_status()
+    if ready:
+        success(f"IndexTTS 2 环境已就绪（{detail}）")
+        return
+
+    print(f"\n{Color.YELLOW}IndexTTS 2 {detail}{Color.RESET}")
+    print(f"{Color.DIM}自动安装将执行: 克隆 index-tts 仓库 → uv sync 安装依赖 → 下载模型权重")
+    print(f"共约 8GB 下载量，会读取 .env 中的 NETWORK_PROXY 作为下载代理{Color.RESET}")
+
+    idx = choose("是否现在自动安装 IndexTTS 2 环境？", [
+        "立即自动安装（约 8GB，请耐心等待）",
+        "暂不安装",
+    ], default=1 if not force_prompt else 0)
+    if idx != 0:
+        print(f"{Color.DIM}稍后可随时在「TTS 配音配置 → 安装 / 检测 IndexTTS 环境」中安装")
+        print(f"或手动运行: python scripts/setup_indextts.py{Color.RESET}")
+        return
+
+    if install_indextts():
+        success("IndexTTS 2 环境安装完成！")
+    else:
+        print(f"{Color.RED}安装未完成，可重试或手动运行: python scripts/setup_indextts.py{Color.RESET}")
 
 
 def _config_subtitle(config: Config):
@@ -1233,7 +1277,7 @@ def add_common_args(parser):
     parser.add_argument("-o", "--output-dir", default=None, help="输出目录")
     parser.add_argument("--asr-engine", choices=["whisper-api", "faster-whisper"], default=None)
     parser.add_argument("--translate-engine", choices=["openai", "ollama", "google", "mymemory"], default=None)
-    parser.add_argument("--tts-engine", choices=["edge", "azure"], default=None)
+    parser.add_argument("--tts-engine", choices=["edge", "azure", "index"], default=None)
     parser.add_argument("--translate-model", default=None)
     parser.add_argument("--whisper-model", default=None)
     parser.add_argument("--faster-whisper-model", default=None, help="faster-whisper 模型版本: tiny/base/small/medium/large-v3")

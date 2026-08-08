@@ -155,9 +155,23 @@ class FasterWhisperTranscriber(Transcriber):
                 "或使用 OpenAI Whisper API（需 OPENAI_API_KEY）"
             )
 
-        # 设置 HuggingFace 镜像（国内网络优化）
+        # 代理：如果配置了 network_proxy，设置给 HuggingFace 下载
+        # （cli.py 启动时已全局设置，这里做保险：直接 import transcriber 也能用）
         import os as _os
-        _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        proxy = getattr(self.config, "network_proxy", "") or ""
+        if proxy:
+            if not proxy.startswith(("http://", "https://", "socks")):
+                proxy = f"http://{proxy}"
+            _os.environ.setdefault("HTTP_PROXY", proxy)
+            _os.environ.setdefault("HTTPS_PROXY", proxy)
+            _os.environ.setdefault("http_proxy", proxy)
+            _os.environ.setdefault("https_proxy", proxy)
+            # 本地地址不走代理（Ollama 在本地）
+            _os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,0.0.0.0,::1")
+            _os.environ.setdefault("no_proxy", "localhost,127.0.0.1,0.0.0.0,::1")
+        else:
+            # 无代理时使用 HuggingFace 国内镜像（有代理则走官方源，镜像可能不可达）
+            _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         _os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         # 禁用 Xet 存储（新版本 huggingface_hub 默认使用，国内 401）
         _os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -175,20 +189,6 @@ class FasterWhisperTranscriber(Transcriber):
                 _hf_file_download._are_symlinks_supported_in_dir[_cache_dir] = False
             except Exception:
                 pass  # 失败不影响主流程（huggingface_hub 会自动检测并降级）
-
-        # 代理：如果配置了 network_proxy，设置给 HuggingFace 下载
-        # （cli.py 启动时已全局设置，这里做保险：直接 import transcriber 也能用）
-        proxy = getattr(self.config, "network_proxy", "") or ""
-        if proxy:
-            if not proxy.startswith(("http://", "https://", "socks")):
-                proxy = f"http://{proxy}"
-            _os.environ.setdefault("HTTP_PROXY", proxy)
-            _os.environ.setdefault("HTTPS_PROXY", proxy)
-            _os.environ.setdefault("http_proxy", proxy)
-            _os.environ.setdefault("https_proxy", proxy)
-            # 本地地址不走代理（Ollama 在本地）
-            _os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,0.0.0.0,::1")
-            _os.environ.setdefault("no_proxy", "localhost,127.0.0.1,0.0.0.0,::1")
 
         print(f"[asr] faster-whisper 本地识别中（模型: {self.model_size}）...")
         print(f"[asr] 使用 HuggingFace 镜像: {_os.environ.get('HF_ENDPOINT', '默认')}")
@@ -239,9 +239,15 @@ class FasterWhisperTranscriber(Transcriber):
 
 
 def pre_download_faster_whisper_model(model_size: str, config: Config = None) -> bool:
-    """预下载 faster-whisper 模型（不执行识别）
+    """预下载 faster-whisper 模型（不执行识别），带下载源自动回退
 
-    在 CLI 配置菜单中调用，让用户提前下载模型，避免首次使用时等待。
+    在 CLI 配置菜单中调用：用户选择模型版本后立即下载，进度实时可见。
+
+    下载源回退链：
+      1. 配置了代理 → HuggingFace 官方源（走代理）
+      2. 国内镜像 hf-mirror（直连）
+      3. HuggingFace 官方源（直连）
+      4. 全部失败 → 提示配置代理
 
     返回 True 表示成功（或已存在），False 表示失败。
     """
@@ -251,8 +257,6 @@ def pre_download_faster_whisper_model(model_size: str, config: Config = None) ->
         print(f"[asr] 未知模型: {model_size}")
         return False
 
-    print(f"[asr] 准备下载 faster-whisper 模型: {model_size} ({model_sizes[model_size]})")
-
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -260,30 +264,53 @@ def pre_download_faster_whisper_model(model_size: str, config: Config = None) ->
         return False
 
     import os as _os
-    _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    _os.environ["HF_HUB_DISABLE_XET"] = "1"
-    _os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
     models_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), ".models")
     _os.makedirs(models_dir, exist_ok=True)
 
-    # 代理设置
-    if config and getattr(config, "network_proxy", ""):
-        proxy = config.network_proxy
-        if not proxy.startswith(("http://", "https://", "socks")):
-            proxy = f"http://{proxy}"
-        _os.environ.setdefault("HTTP_PROXY", proxy)
-        _os.environ.setdefault("HTTPS_PROXY", proxy)
+    # 代理（来自 .env 的 NETWORK_PROXY）
+    proxy = (getattr(config, "network_proxy", "") or "") if config else ""
+    if proxy and not proxy.startswith(("http://", "https://", "socks")):
+        proxy = f"http://{proxy}"
 
-    try:
-        print(f"[asr] 下载中（保存到 {models_dir}）...")
-        # 只下载模型，不做识别
-        WhisperModel(model_size, device="cpu", compute_type="int8", download_root=models_dir)
-        print(f"[asr] ✓ 模型 {model_size} 下载完成!")
-        return True
-    except Exception as e:
-        print(f"[asr] ✗ 下载失败: {e}")
-        return False
+    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
+
+    def _set_env(use_proxy: bool, hf_endpoint: str = None):
+        """按尝试方案设置下载环境（代理 / HF 端点）"""
+        for k in proxy_keys:
+            _os.environ.pop(k, None)
+        if use_proxy:
+            for k in proxy_keys:
+                _os.environ[k] = proxy
+        if hf_endpoint:
+            _os.environ["HF_ENDPOINT"] = hf_endpoint
+        else:
+            _os.environ.pop("HF_ENDPOINT", None)
+        # 禁用 Xet 存储（国内 401）和 symlink 警告
+        _os.environ["HF_HUB_DISABLE_XET"] = "1"
+        _os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+    attempts = []
+    if proxy:
+        attempts.append(("HuggingFace 官方源（走代理）", True, None))
+    attempts.append(("国内镜像 hf-mirror（直连）", False, "https://hf-mirror.com"))
+    attempts.append(("HuggingFace 官方源（直连）", False, None))
+
+    print(f"[asr] 准备下载 faster-whisper 模型: {model_size} ({model_sizes[model_size]})，保存到 {models_dir}")
+    for label, use_proxy, endpoint in attempts:
+        print(f"[asr] --- 尝试: {label} ---")
+        _set_env(use_proxy, endpoint)
+        try:
+            # 只下载模型，不做识别；下载进度条实时可见
+            WhisperModel(model_size, device="cpu", compute_type="int8", download_root=models_dir)
+            print(f"[asr] ✓ 模型 {model_size} 下载完成!")
+            return True
+        except Exception as e:
+            print(f"[asr] ✗ 「{label}」失败: {str(e)[:200]}")
+            print(f"[asr] 切换下一个下载源...")
+
+    print(f"[asr] ✗ 模型 {model_size} 所有下载源均失败")
+    print(f"[asr]   建议在 .env 中配置 NETWORK_PROXY（如 http://127.0.0.1:7897）后重试")
+    return False
 
 
 def create_transcriber(config: Config) -> Transcriber:

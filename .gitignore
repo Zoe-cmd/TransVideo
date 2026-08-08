@@ -45,3 +45,6 @@ Desktop.ini
 *.tmp
 *.bak
 *.part
+
+# IndexTTS 2（体积大，由 scripts/setup_indextts.py 或 CLI 配置界面自动安装）
+index-tts/
