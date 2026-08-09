@@ -100,34 +100,47 @@ class OpenAITranslator(Translator):
         )
 
     def _parse_response(self, response: str, expected_count: int) -> List[str]:
-        """解析模型返回的带编号译文"""
-        translations = []
-        lines = response.strip().split("\n")
-        for line in lines:
+        """解析模型返回的带编号译文（严格按编号对位）
+
+        旧实现按"行顺序"位置映射，模型只要多输出一行（开场白/空行/把两条合并
+        成一行），其后所有译文就整体错位一位——字幕时间和内容对不上。
+        现在只按显式编号放入对应槽位，匹配不到的编号留空，
+        由调用方走单条降级补译，保证译文和片段永远一一对应。
+
+        返回长度恒为 expected_count 的列表，缺失条目为 ""。
+        """
+        import re
+        slots = [""] * expected_count
+        current = -1  # 当前累积的槽位下标
+        for line in response.strip().split("\n"):
             line = line.strip()
             if not line:
                 continue
-            # 匹配 [编号] 译文 格式
-            import re
-            m = re.match(r'^\[?\d+\]?\s*(.*)', line)
+            idx = None
+            text = ""
+            m = re.match(r'^\[(\d{1,3})\]\s*(.*)', line)  # 严格 [n] 格式
             if m:
-                translations.append(m.group(1).strip())
-            elif translations:
-                # 多行译文续行
-                translations[-1] += " " + line
-
-        # 如果解析数量不匹配，回退到按行分割
-        if len(translations) != expected_count:
-            print(f"[translate] 警告: 解析数量 {len(translations)} != 预期 {expected_count}，回退处理")
-            clean_lines = [l.strip() for l in response.strip().split("\n") if l.strip()]
-            if len(clean_lines) >= expected_count:
-                translations = clean_lines[:expected_count]
+                idx = int(m.group(1)) - 1
+                text = m.group(2).strip()
             else:
-                # 不足的用原文填充
-                while len(translations) < expected_count:
-                    translations.append("")
+                # 宽松格式 n. / n、/ n: ——只在恰好是顺序下一条时采信，
+                # 避免译文内容本身的数字开头（如 "4.7 这样的数值"）被误吞
+                m = re.match(r'^(\d{1,3})[\.、:：\)）]\s*(.*)', line)
+                if m and int(m.group(1)) - 1 == current + 1:
+                    idx = int(m.group(1)) - 1
+                    text = m.group(2).strip()
+            if idx is not None and 0 <= idx < expected_count:
+                current = idx
+                slots[idx] = text
+            elif current >= 0:
+                # 非编号行：作为上一条译文的续行
+                slots[current] = (slots[current] + " " + line).strip()
 
-        return translations[:expected_count]
+        missing = [i + 1 for i, t in enumerate(slots) if not t]
+        if missing:
+            print(f"[translate] 警告: 批次内 {len(missing)}/{expected_count} 条未匹配到编号: "
+                  f"{missing[:10]}{'...' if len(missing) > 10 else ''}（将单条补译）")
+        return slots
 
     def _call_api_with_retry(self, prompt: str, max_retries: int = 3) -> str:
         """调用 OpenAI API，带指数退避重试 + 模型级备选
