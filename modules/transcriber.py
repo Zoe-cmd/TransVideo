@@ -90,6 +90,40 @@ class WhisperAPITranscriber(Transcriber):
         return segments
 
 
+def _normalize_for_repeat_check(text: str) -> str:
+    """归一化文本用于重复检测：小写、去除所有空白和标点"""
+    import re
+    return re.sub(r"[\s\W_]+", "", text.lower())
+
+
+def _collapse_repeat_hallucinations(segments: List[Segment]) -> List[Segment]:
+    """折叠 ASR 重复幻觉：同一句文本连续重复 >=3 次时只保留第一次
+
+    whisper 在静音/音乐/赞助过渡音频上容易产生自我循环（同一句连读多次），
+    导致译文和配音也跟着复读。只折叠"连续 >=3 次完全相同（忽略标点空白）"
+    且句子有一定长度的情况，正常说话中偶尔重复一两次不会误伤。
+    时间跨度保留：start 取第一次，end 取最后一次。
+    """
+    if not segments:
+        return segments
+    result = []
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        norm = _normalize_for_repeat_check(seg.text)
+        j = i + 1
+        if len(norm) >= 10:  # 太短的句子（yeah / 嗯）不视为幻觉
+            while j < len(segments) and _normalize_for_repeat_check(segments[j].text) == norm:
+                j += 1
+        if j - i >= 3:
+            print(f"[asr] 折叠重复幻觉: 同一句连续出现 {j - i} 次，只保留一次: {seg.text[:40]}...")
+            result.append(Segment(start=seg.start, end=segments[j - 1].end, text=seg.text))
+        else:
+            result.extend(segments[i:j])
+        i = j
+    return result
+
+
 class FasterWhisperTranscriber(Transcriber):
     """faster-whisper 本地语音识别（无需 API key）"""
 
@@ -222,6 +256,9 @@ class FasterWhisperTranscriber(Transcriber):
             language=language,
             vad_filter=True,
             beam_size=5,
+            # 切断"以上文为提示"：前一片段结尾的句子会被模型当成上下文复读，
+            # 在静音/音乐/过渡音频上形成自我循环（同一句连读 N 次的幻觉）
+            condition_on_previous_text=False,
         )
 
         segments = []
@@ -233,6 +270,8 @@ class FasterWhisperTranscriber(Transcriber):
                     end=seg.end,
                     text=text,
                 ))
+
+        segments = _collapse_repeat_hallucinations(segments)
 
         print(f"[asr] 识别完成: {len(segments)} 个片段, 检测语言: {info.language}")
         return segments
