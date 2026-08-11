@@ -42,7 +42,7 @@
 | 语音识别 | OpenAI Whisper API（云端快）或 faster-whisper（本地 GPU 免费） |
 | 翻译 | GPT 兼容接口 / Ollama 本地大模型 / Google / MyMemory，失败自动降级 |
 | 配音 | edge-tts（免费）/ Azure TTS / **IndexTTS 2（克隆原声+保留情感）** |
-| 字幕 | 黑底白字 YouTube 风格，支持单语 / 双语，字号边距可调 |
+| 字幕 | 黑底白字 YouTube 风格，支持单语 / 双语，字号边距可调；超长句自适应拆分显示，不丢字 |
 | 音轨 | 可保留原声作背景（音量可调），也可完全替换 |
 | GPU 加速 | ASR、IndexTTS、视频编码（NVENC）全部支持 GPU |
 
@@ -140,7 +140,7 @@ python cli.py
 | 更改 ASR 引擎 / Whisper 模型 | 切换 whisper-api / faster-whisper；选模型版本后**立即提示下载**，进度条实时可见 |
 | 更改翻译引擎 / Ollama 模型 | 切换 openai / ollama / google / mymemory |
 | 更改 TTS 引擎 / 音色 | 切换 edge / azure / index、选各语言音色、调语速音量、**安装/检测 IndexTTS 环境** |
-| 更改字幕设置 | 单语/双语、字号、字体、边距、换行宽度、颜色 |
+| 更改字幕设置 | 单语/双语、字号、字体、边距、换行宽度、颜色、超长句处理 |
 | OpenAI 配置 | API Key、Base URL、翻译模型及备选模型链、Whisper API 模型 |
 | 设置网络代理 | YouTube / HuggingFace 下载必需 |
 | 设置 TikTok cookies 浏览器 | 借用浏览器 cookies 绕过反爬 |
@@ -321,6 +321,9 @@ A: TikTok 反爬严格：先在浏览器登录 tiktok.com，然后在 `.env` 设
 
 **Q: YouTube 下载失败？**
 A: 国内需要代理：`.env` 里设置 `NETWORK_PROXY=http://127.0.0.1:端口`。
+
+**Q: 字幕太长显示不全 / 被截断？**
+A: 默认已是自适应模式（`SUBTITLE_OVERFLOW_MODE=split`）：一句话换行后超过 `SUBTITLE_MAX_LINES` 行时，会自动拆成多条字幕，按文字量占比分配显示时长、跟随语音节奏依次显示，字号不变、一个字都不丢。想要单行滚动字幕效果就把 `SUBTITLE_MAX_LINES=1`；想恢复旧的截断行为设 `SUBTITLE_OVERFLOW_MODE=truncate`。
 
 **Q: 想用第三方 OpenAI 中转站？**
 A: `.env` 里改 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，`TRANSLATE_MODEL` 填中转站支持的模型名，还可以用 `TRANSLATE_MODEL_FALLBACKS` 配一串备选模型自动切换。

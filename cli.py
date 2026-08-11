@@ -1195,6 +1195,7 @@ def _config_subtitle(config: Config):
         info("边距", f"margin_v={config.subtitle_margin_v}")
         info("换行阈值", f"{config.subtitle_max_width_percent:.0%}")
         info("最大行数", str(config.subtitle_max_lines))
+        info("超长字幕", f"{config.subtitle_overflow_mode} ({'拆分依次显示, 不丢字' if config.subtitle_overflow_mode == 'split' else '超出行数截断'})")
         info("颜色", f"文字={config.subtitle_primary_color} / 背景={config.subtitle_outline_color}")
 
         sub = choose("字幕选项", [
@@ -1203,11 +1204,12 @@ def _config_subtitle(config: Config):
             "字幕边距 margin_v",
             "换行阈值",
             "最大行数",
+            "超长字幕处理 (拆分/截断)",
             "字体",
             "返回",
         ], default=last_choice)
 
-        if sub is None or sub == 6:
+        if sub is None or sub == 7:
             return
         last_choice = sub
 
@@ -1253,6 +1255,17 @@ def _config_subtitle(config: Config):
             except ValueError:
                 warn("无效数值")
         elif sub == 5:
+            idx = choose("超长字幕处理", [
+                "split (拆成多条按节奏依次显示, 不丢字)",
+                "truncate (超出最大行数直接截断)",
+            ], default=0 if config.subtitle_overflow_mode == "split" else 1)
+            if idx is None:
+                pass  # 取消
+            else:
+                config.subtitle_overflow_mode = ["split", "truncate"][idx]
+                success(f"超长字幕处理已设为 {config.subtitle_overflow_mode}")
+                _save_config(config)
+        elif sub == 6:
             font = input_with_default("字体名称 (如 Arial / 微软雅黑 / SimHei)", config.subtitle_font)
             if font:
                 config.subtitle_font = font

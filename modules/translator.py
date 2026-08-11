@@ -56,9 +56,12 @@ class OpenAITranslator(Translator):
         self.config = config
         from openai import OpenAI
         # 支持自定义 base_url
+        # timeout=120s：走代理时偶发 TCP 读挂死，默认 600s 会让整批翻译长时间卡住；
+        # 超时后由 _call_api_with_retry 的退避重试接管
         self.client = OpenAI(
             api_key=config.openai_api_key,
             base_url=config.openai_base_url if config.openai_base_url else None,
+            timeout=120.0,
         )
         self.model = config.translate_model
         self.batch_size = 20

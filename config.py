@@ -188,6 +188,8 @@ class Config:
     subtitle_margin_v: int = 40
     subtitle_max_width_percent: float = 0.6
     subtitle_max_lines: int = 2
+    # 超长字幕处理: split (拆分为多条按节奏依次显示, 不丢字) / truncate (超出截断)
+    subtitle_overflow_mode: str = "split"
 
     # ===== 音频 =====
     keep_original_audio: bool = False
@@ -280,6 +282,7 @@ _ENV_KEY_MAP = {
     "subtitle_margin_v":       ("SUBTITLE_MARGIN_V", int),
     "subtitle_max_width_percent": ("SUBTITLE_MAX_WIDTH_PERCENT", float),
     "subtitle_max_lines":      ("SUBTITLE_MAX_LINES", int),
+    "subtitle_overflow_mode":  ("SUBTITLE_OVERFLOW_MODE", str),
     # 音频
     "keep_original_audio":     ("AUDIO_KEEP_ORIGINAL", bool),
     "original_audio_volume":   ("AUDIO_ORIGINAL_VOLUME", float),
@@ -414,7 +417,7 @@ def _migrate_yaml_to_env(yaml_path: str) -> dict:
                       "fontsize": "SUBTITLE_FONTSIZE", "primary_color": "SUBTITLE_PRIMARY_COLOR",
                       "outline_color": "SUBTITLE_OUTLINE_COLOR", "outline_width": "SUBTITLE_OUTLINE_WIDTH",
                       "margin_v": "SUBTITLE_MARGIN_V", "max_width_percent": "SUBTITLE_MAX_WIDTH_PERCENT",
-                      "max_lines": "SUBTITLE_MAX_LINES"},
+                      "max_lines": "SUBTITLE_MAX_LINES", "overflow_mode": "SUBTITLE_OVERFLOW_MODE"},
         "audio": {"keep_original": "AUDIO_KEEP_ORIGINAL", "original_volume": "AUDIO_ORIGINAL_VOLUME"},
         "google_translate": {"url": "GOOGLE_TRANSLATE_URL"},
         "network": {"proxy": "NETWORK_PROXY", "timeout": "NETWORK_TIMEOUT",
