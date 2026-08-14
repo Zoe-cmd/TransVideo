@@ -101,7 +101,7 @@ class YouTubeParser:
             # 策略 1：使用浏览器 cookies 绕过反爬
             if tiktok_strategy == 1 and self.tiktok_cookies_browser:
                 opts["cookiesfrombrowser"] = (self.tiktok_cookies_browser,)
-                print(f"[youtube] TikTok 策略1: 使用 {self.tiktok_cookies_browser} cookies")
+                print(f"[youtube] 策略1: 使用 {self.tiktok_cookies_browser} 浏览器 cookies 绕过反爬")
 
             # 策略 2：使用移动 API（extractor-args）
             # 格式: app_info=iid/app_name/app_version/manifest_app_version/aid
@@ -225,15 +225,12 @@ class YouTubeParser:
         is_tiktok = self._is_tiktok_url(url)
         has_cookies = bool(self.tiktok_cookies_browser)
 
-        # 构建策略列表：非 TikTok 只用默认策略；TikTok 根据是否配置 cookies 选择策略
-        if not is_tiktok:
-            strategies = [0]
-        else:
-            # 策略0（默认）→ 策略2（移动API）总是启用
-            # 策略1（cookies）和策略3（组合）仅在配置了 cookies 时启用
-            strategies = [0]
-            if has_cookies:
-                strategies.append(1)
+        # 构建策略列表：默认策略总是启用；配置了 cookies 浏览器时追加 cookies 回退
+        # （YouTube 对数据中心/代理 IP 会间歇性触发"人机验证"/403，浏览器 cookies 可绕过）
+        strategies = [0]
+        if has_cookies:
+            strategies.append(1)
+        if is_tiktok:
             strategies.append(2)
             if has_cookies:
                 strategies.append(3)
@@ -291,22 +288,35 @@ class YouTubeParser:
                 err_str = str(e)
                 errors.append(f"{strategy_names[strategy]}策略: {err_str[:200]}")
 
-                # 非 TikTok 错误：直接抛出（不聚合，保留原始异常类型）
-                if not is_tiktok:
-                    raise
-
-                # TikTok 错误：判断是否可以尝试下一个策略
                 is_last = (idx == len(strategies) - 1)
                 if is_last:
                     # 最后一个策略也失败了，抛出聚合错误
                     break
 
-                # 对于"universal data"错误，尝试下一个策略
-                # 对于其他错误（如网络超时、代理错误），也尝试下一个策略
+                # 人机验证/403/网络错误都尝试下一个策略
                 next_name = strategy_names[strategies[idx + 1]]
                 print(f"[youtube] {strategy_names[strategy]}策略失败，尝试{next_name}策略...")
 
-        # 所有策略都失败（仅 TikTok 会走到这里）
+        # 所有策略都失败
+        if not is_tiktok:
+            cookies_hint = (
+                "  ★ 在 .env 设置 TIKTOK_COOKIES_BROWSER=edge（或 chrome/firefox），\n"
+                "    并先在浏览器登录 youtube.com，程序可自动提取 cookies 绕过验证\n"
+                "    （注意：提取时需先完全关闭对应浏览器，否则 cookie 数据库被占用）\n"
+            ) if not has_cookies else (
+                "  ★ cookies 提取失败时，请先完全关闭对应浏览器再重试\n"
+            )
+            raise RuntimeError(
+                f"视频下载失败（尝试了 {len(errors)} 种策略）:\n" +
+                "\n".join(f"  - {e}" for e in errors) +
+                "\n\n解决方法:\n"
+                "  1. YouTube 对代理 IP 的风控是间歇性的，稍等几分钟到几小时后重试\n"
+                f"{cookies_hint}"
+                "  2. 更新 yt-dlp: pip install -U yt-dlp\n"
+                "  3. 检查代理是否可用\n"
+                "  4. 视频可能已被删除或地区受限"
+            )
+
         cookies_hint = (
             "  ★ 在配置中设置 tiktok_cookies_browser（chrome/firefox/edge 等）\n"
             "    先在浏览器中登录 https://www.tiktok.com，然后程序可自动提取 cookies\n"

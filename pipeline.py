@@ -493,12 +493,19 @@ class TranslationPipeline:
 
         # 智能断句合并：ASR 常把一个完整句子切分成多个片段，
         # 按句末标点和时长阈值合并，让翻译和配音获得完整上下文
-        from modules.segment_merger import merge_segments
+        from modules.segment_merger import merge_segments, rebalance_segments
         original_count = len(segments)
         segments = merge_segments(segments)
         merged_count = len(segments)
         if merged_count < original_count:
             print(f"[asr] 智能断句合并: {original_count} → {merged_count} 个片段（减少 {original_count - merged_count} 个过碎片段）")
+
+        # 句读边界对齐：合并不动的长句仍会被切在句中（受 max_duration 限制），
+        # 把结尾没说完的残句挪给下一片段，让每段都以完整句子结束
+        if getattr(self.config, "segment_sentence_align", True):
+            segments, moved = rebalance_segments(segments)
+            if moved:
+                print(f"[asr] 句读边界对齐: {moved} 处残句已移入下一片段")
 
         save_segments(segments, segments_path)
         return segments

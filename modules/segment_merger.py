@@ -128,6 +128,97 @@ def merge_translated_segments(segments: List[Segment],
     return merge_segments(segments, min_duration, max_duration, max_gap)
 
 
+# 句末标点（含其后可能的闭合引号/括号/空白）。
+# 小数点不算句末：点号两侧都是数字时（如 2.8、3.5）不匹配。
+_SENTENCE_BOUNDARY_RE = re.compile(
+    r'(?:(?<!\d)\.(?!\d)|[!?。！？])["\'”’\)）\]】»]*\s*')
+
+
+def rebalance_segments(segments: List[Segment],
+                       min_side_duration: float = 0.4):
+    """句读边界对齐：让每个片段都以完整句子结束
+
+    merge_segments 受 max_duration 限制，长句子依然会被切在句中
+    （如 "...预测一个" / "分数。这里..."），导致字幕读着不连贯、
+    翻译模型拿到半句话还容易擅自合并条目（引发整批错位）。
+
+    本函数在合并之后做两遍边界对齐：
+      第一遍（正向）：片段最后一个句末标点之后的残句 → 挪到下一片段开头
+      第二遍（反向）：整段无句末标点（whisper 漏标点）→ 从下一片段
+                     开头"借"回这句的后半截，补全本段
+      - 时间边界按字符占比同步移动，文字始终落在它被说出的时间窗内
+      - 任一侧不足 min_side_duration 秒时放弃挪动（避免一闪而过的片段）
+
+    片段总数不变。返回 (segments, moved_count)。
+    """
+    if len(segments) < 2:
+        return segments, 0
+
+    moved = 0
+    for i in range(len(segments) - 1):
+        text = segments[i].text.strip()
+        # 找最后一个句末标点的结束位置
+        last_end = 0
+        for m in _SENTENCE_BOUNDARY_RE.finditer(text):
+            last_end = m.end()
+        if last_end <= 0 or last_end >= len(text):
+            continue  # 无句末标点，或本来就以句末标点结尾
+
+        head, tail = text[:last_end].strip(), text[last_end:].strip()
+        if not head or not tail:
+            continue
+
+        # 按字符占比移动时间边界
+        seg_dur = segments[i].end - segments[i].start
+        ratio = len(head) / len(text)
+        boundary = segments[i].start + seg_dur * ratio
+
+        # 两侧窗口都不能太短
+        if boundary - segments[i].start < min_side_duration:
+            continue
+        if segments[i].end - boundary < min_side_duration:
+            continue
+
+        segments[i].text = head
+        segments[i].end = boundary
+        next_text = segments[i + 1].text.strip()
+        segments[i + 1].text = f"{tail} {next_text}" if next_text else tail
+        segments[i + 1].start = boundary
+        moved += 1
+
+    # 第二遍（反向补全）：整段没有任何句末标点时（whisper 偶尔整段漏标点，
+    # 如 "...to predict one" / "score for each expert." 被切成两段），
+    # 从下一片段开头"借"回这句的后半截，让本段以完整句子结束。
+    # 时间边界同样按字符占比同步移动（借来的文字在下一片段窗口的开头说出，
+    # 所以本段窗口向右延伸、下一片段从边界处开始）。
+    for i in range(len(segments) - 1):
+        if _ends_with_sentence_punct(segments[i].text):
+            continue  # 已是完整句子（或第一遍已修好）
+        next_text = segments[i + 1].text.strip()
+        m = _SENTENCE_BOUNDARY_RE.search(next_text)
+        if not m:
+            continue  # 下一片段也没有句末标点，无法补全
+        prefix, rest = next_text[:m.end()].strip(), next_text[m.end():].strip()
+        if not prefix or not rest:
+            continue  # 不能把下一片段借空
+
+        next_dur = segments[i + 1].end - segments[i + 1].start
+        ratio = len(prefix) / len(next_text)
+        if ratio > 0.6:
+            continue  # 借得太多会毁掉下一片段，放弃
+        boundary = segments[i + 1].start + next_dur * ratio
+        if segments[i + 1].end - boundary < min_side_duration:
+            continue
+
+        segments[i].text = segments[i].text.strip() + " " + prefix
+        segments[i].end = boundary
+        segments[i + 1].text = rest
+        segments[i + 1].start = boundary
+        moved += 1
+
+    return segments, moved
+
+
 # 简单测试
 if __name__ == "__main__":
     import json

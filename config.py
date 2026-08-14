@@ -195,6 +195,10 @@ class Config:
     keep_original_audio: bool = False
     original_audio_volume: float = 0.15
 
+    # ===== 断句 =====
+    # ASR 片段句读边界对齐：把结尾没说完的残句挪给下一片段，让每段都是完整句子
+    segment_sentence_align: bool = True
+
     # ===== Google 翻译 =====
     google_translate_url: str = "https://translate.googleapis.com/translate_a/single"
 
@@ -285,6 +289,7 @@ _ENV_KEY_MAP = {
     "subtitle_overflow_mode":  ("SUBTITLE_OVERFLOW_MODE", str),
     # 音频
     "keep_original_audio":     ("AUDIO_KEEP_ORIGINAL", bool),
+    "segment_sentence_align":  ("SEGMENT_SENTENCE_ALIGN", bool),
     "original_audio_volume":   ("AUDIO_ORIGINAL_VOLUME", float),
     # Google
     "google_translate_url":    ("GOOGLE_TRANSLATE_URL", str),
@@ -419,6 +424,7 @@ def _migrate_yaml_to_env(yaml_path: str) -> dict:
                       "margin_v": "SUBTITLE_MARGIN_V", "max_width_percent": "SUBTITLE_MAX_WIDTH_PERCENT",
                       "max_lines": "SUBTITLE_MAX_LINES", "overflow_mode": "SUBTITLE_OVERFLOW_MODE"},
         "audio": {"keep_original": "AUDIO_KEEP_ORIGINAL", "original_volume": "AUDIO_ORIGINAL_VOLUME"},
+        "segment": {"sentence_align": "SEGMENT_SENTENCE_ALIGN"},
         "google_translate": {"url": "GOOGLE_TRANSLATE_URL"},
         "network": {"proxy": "NETWORK_PROXY", "timeout": "NETWORK_TIMEOUT",
                      "tiktok_cookies_browser": "TIKTOK_COOKIES_BROWSER"},

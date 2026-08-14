@@ -42,6 +42,7 @@
 | 语音识别 | OpenAI Whisper API（云端快）或 faster-whisper（本地 GPU 免费） |
 | 翻译 | GPT 兼容接口 / Ollama 本地大模型 / Google / MyMemory，失败自动降级 |
 | 配音 | edge-tts（免费）/ Azure TTS / **IndexTTS 2（克隆原声+保留情感）** |
+| 智能断句 | ASR 片段按句读边界自动对齐：残句跨段重排，字幕/翻译/配音都以完整句子为单位 |
 | 字幕 | 黑底白字 YouTube 风格，支持单语 / 双语，字号边距可调；超长句自适应拆分显示，不丢字 |
 | 音轨 | 可保留原声作背景（音量可调），也可完全替换 |
 | GPU 加速 | ASR、IndexTTS、视频编码（NVENC）全部支持 GPU |

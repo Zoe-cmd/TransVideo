@@ -84,25 +84,47 @@ class OpenAITranslator(Translator):
         if self.model_fallbacks:
             print(f"[translate] OpenAI 模型链: {self.model} → {' → '.join(self.model_fallbacks)}")
 
-    def _build_prompt(self, source_lang: str, target_lang: str, batch_texts: List[str]) -> str:
+    def _build_prompt(self, source_lang: str, target_lang: str, batch_texts: List[str],
+                      context_before: str = "", context_after: str = "") -> str:
         src_name = LANG_NAMES.get(source_lang, source_lang)
         tgt_name = LANG_NAMES.get(target_lang, target_lang)
 
         # 构造带编号的文本，要求模型按编号返回
         numbered = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(batch_texts))
 
+        context_note = ""
+        if context_before or context_after:
+            parts = []
+            if context_before:
+                parts.append(f"前一句：「{context_before}」")
+            if context_after:
+                parts.append(f"后一句：「{context_after}」")
+            context_note = (
+                "\n上下文参考（仅供理解语义，不要翻译）："
+                + "；".join(parts) + "\n"
+            )
+
         return (
             f"你是专业视频字幕翻译。将以下{src_name}字幕翻译为{tgt_name}。\n"
+            f"{context_note}"
             f"要求：\n"
             f"1. 保持口语化，适合配音和阅读\n"
             f"2. 保持原意，不增删信息\n"
-            f"3. 科普/教学类内容，专业术语翻译准确\n"
-            f"4. 严格按编号格式返回译文，每行一条：[编号] 译文\n\n"
+            f"3. 专业术语（模型名、技术名词如 logits、SwiGLU、tanh 等）直接保留英文，"
+            f"或用业界通用中文译名——二选一，不要中英文括号对照（配音会念出来）；"
+            f"不要生造词\n"
+            f"4. 各条译文之间保持连贯：同一术语前后译法一致，代词指代按上下文理解\n"
+            f"5. 严格按编号格式返回译文，每行一条：[编号] 译文\n"
+            f"6. 每条译文只翻译对应编号原文的内容。即使某条原文在句中截断、"
+            f"看起来不完整，也只翻译本条文字，绝对不要合并相邻编号的内容，"
+            f"不要把别的编号的内容翻译到本条\n"
+            f"7. 输出必须正好 {len(batch_texts)} 条编号（[1] 到 [{len(batch_texts)}]，"
+            f"一个不能多、一个不能少、编号不得跳变或重排\n\n"
             f"原文：\n{numbered}\n\n"
-            f"译文（严格按 [编号] 格式）："
+            f"译文（严格按 [编号] 格式，共 {len(batch_texts)} 条）："
         )
 
-    def _parse_response(self, response: str, expected_count: int) -> List[str]:
+    def _parse_response(self, response: str, expected_count: int) -> tuple:
         """解析模型返回的带编号译文（严格按编号对位）
 
         旧实现按"行顺序"位置映射，模型只要多输出一行（开场白/空行/把两条合并
@@ -110,10 +132,15 @@ class OpenAITranslator(Translator):
         现在只按显式编号放入对应槽位，匹配不到的编号留空，
         由调用方走单条降级补译，保证译文和片段永远一一对应。
 
-        返回长度恒为 expected_count 的列表，缺失条目为 ""。
+        返回 (slots, matched_indices)：
+          - slots: 长度恒为 expected_count 的列表，缺失条目为 ""
+          - matched_indices: 实际匹配到的编号下标集合。若 len(matched_indices)
+            != expected_count，说明模型合并/拆分了条目并重新编号——
+            此时所有槽位内容都不可信（可能整体错位），调用方应整批重译。
         """
         import re
         slots = [""] * expected_count
+        matched = set()
         current = -1  # 当前累积的槽位下标
         for line in response.strip().split("\n"):
             line = line.strip()
@@ -135,6 +162,7 @@ class OpenAITranslator(Translator):
             if idx is not None and 0 <= idx < expected_count:
                 current = idx
                 slots[idx] = text
+                matched.add(idx)
             elif current >= 0:
                 # 非编号行：作为上一条译文的续行
                 slots[current] = (slots[current] + " " + line).strip()
@@ -142,8 +170,8 @@ class OpenAITranslator(Translator):
         missing = [i + 1 for i, t in enumerate(slots) if not t]
         if missing:
             print(f"[translate] 警告: 批次内 {len(missing)}/{expected_count} 条未匹配到编号: "
-                  f"{missing[:10]}{'...' if len(missing) > 10 else ''}（将单条补译）")
-        return slots
+                  f"{missing[:10]}{'...' if len(missing) > 10 else ''}")
+        return slots, matched
 
     def _call_api_with_retry(self, prompt: str, max_retries: int = 3) -> str:
         """调用 OpenAI API，带指数退避重试 + 模型级备选
@@ -232,7 +260,7 @@ class OpenAITranslator(Translator):
         """单条翻译（用于批次失败时降级）"""
         prompt = self._build_prompt(source_lang, target_lang, [text])
         content = self._call_api_with_retry(prompt, max_retries=2)
-        translations = self._parse_response(content, 1)
+        translations, _ = self._parse_response(content, 1)
         return translations[0] if translations and translations[0] else text
 
     def translate(self, segments: List[Segment], source_lang: str, target_lang: str) -> List[Segment]:
@@ -252,14 +280,43 @@ class OpenAITranslator(Translator):
             print(f"[translate]   批次 {batch_idx+1}/{total_batches} ({len(batch)} 条)...")
 
             batch_texts = [s.text for s in batch]
-            prompt = self._build_prompt(source_lang, target_lang, batch_texts)
+            # 批次边界的上下文（各取相邻片段的首尾 80 字符，供模型理解指代）
+            context_before = segments[start - 1].text[-80:] if start > 0 else ""
+            context_after = segments[end].text[:80] if end < len(segments) else ""
+            prompt = self._build_prompt(source_lang, target_lang, batch_texts,
+                                        context_before, context_after)
 
             try:
                 # 带重试的 API 调用
                 content = self._call_api_with_retry(prompt, max_retries=3)
-                translations = self._parse_response(content, len(batch))
+                translations, matched = self._parse_response(content, len(batch))
+
+                # 编号数量校验：模型合并/拆分条目后会重新编号（返回条数 ≠ 批内条数），
+                # 此时即使槽位填满了，内容也可能是错位的（实测：16 条原文返回 15 条编号，
+                # 从合并点起每条装的是下一条的译文）。对不上就加警示语整批重试一次；
+                # 仍对不上则整批不信任，全部逐条单译。
+                if len(matched) != len(batch):
+                    print(f"[translate]   批次 {batch_idx+1} 编号数量异常 "
+                          f"({len(matched)}/{len(batch)})，可能模型合并了条目，整批重试...")
+                    try:
+                        content = self._call_api_with_retry(
+                            prompt + f"\n\n再次强调：输出必须正好 {len(batch)} 条编号，"
+                                     f"禁止合并或拆分条目。",
+                            max_retries=2)
+                        translations, matched = self._parse_response(content, len(batch))
+                    except Exception as e:
+                        print(f"[translate]   批次 {batch_idx+1} 重试失败: {str(e)[:80]}")
+
+                distrust_batch = len(matched) != len(batch)
+                if distrust_batch:
+                    print(f"[translate]   批次 {batch_idx+1} 编号仍对不上，"
+                          f"整批逐条重译（不信任批量结果）")
 
                 for i, seg in enumerate(batch):
+                    if distrust_batch:
+                        # 整批不可信：全部走单条翻译
+                        seg.translated_text = None
+                        continue
                     translated = translations[i] if i < len(translations) and translations[i] else seg.text
                     if translated == seg.text and translations[i] != seg.text:
                         # 解析失败，标记需要单条重试
