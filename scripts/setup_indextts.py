@@ -244,6 +244,68 @@ def step_verify():
         raise RuntimeError("index-tts 环境验证失败，请查看上方日志")
 
 
+# flash-attn Windows 预编译 wheel 来源（kingbri1/flash-attention，社区维护）
+FLASH_ATTN_REPO_RELEASE = "https://github.com/kingbri1/flash-attention/releases/download/v2.8.3"
+
+
+def _probe(py: str, code: str) -> str:
+    """在 index-tts 环境里执行代码，失败返回空串"""
+    p = subprocess.run([py, "-c", code], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def step_accel(uv: str, proxy: str):
+    """按 .env 的加速开关安装可选加速依赖（triton-windows / flash-attn）
+
+    全部失败也不报错——worker 初始化加速失败会自动降级到基础模式。
+    """
+    try:
+        from config import load_config
+        cfg = load_config(PROJECT_ROOT)
+    except Exception:
+        return
+    want_tc = getattr(cfg, "index_tts_use_torch_compile", False)
+    want_accel = getattr(cfg, "index_tts_use_accel", False)
+    if not (want_tc or want_accel):
+        return
+
+    py = index_python()
+    env = build_env(proxy)
+
+    if want_tc:
+        if _probe(py, "import triton; print(triton.__version__)"):
+            log("triton 已安装，跳过")
+        else:
+            log("安装 triton-windows（torch.compile 加速所需）...")
+            ok = run([uv, "pip", "install", "--python", py,
+                      "triton-windows==3.1.0.post17"], env=env)
+            if not ok:
+                run([uv, "pip", "install", "--python", py,
+                     "triton-windows==3.1.0.post17", "--default-index", ALIYUN_PYPI],
+                    env=build_env())
+
+    if want_accel:
+        if _probe(py, "import flash_attn; print(flash_attn.__version__)"):
+            log("flash-attn 已安装，跳过")
+        else:
+            # 探测 torch / CUDA / Python 版本，拼出匹配的预编译 wheel 文件名
+            info = _probe(py, "import torch,sys;print(torch.__version__,torch.version.cuda,"
+                              "f'cp{sys.version_info.major}{sys.version_info.minor}')")
+            if not info:
+                log("✗ 无法探测 torch 版本，跳过 flash-attn 安装")
+                return
+            torch_ver, cuda_ver, py_tag = info.split()
+            cu = "cu" + cuda_ver.replace(".", "")
+            url = (f"{FLASH_ATTN_REPO_RELEASE}/flash_attn-2.8.3+{cu}torch{torch_ver}"
+                   f"cxx11abiFALSE-{py_tag}-{py_tag}-win_amd64.whl")
+            log(f"安装 flash-attn 2.8.3 预编译 wheel（匹配 torch {torch_ver} / {cu} / {py_tag}）...")
+            log(f"来源: {url}")
+            if not run([uv, "pip", "install", "--python", py, url], env=env):
+                log("✗ 没有匹配的预编译 wheel 或下载失败。")
+                log("  可到 https://github.com/kingbri1/flash-attention/releases 手动找匹配版本；")
+                log("  装不上也不影响使用——配音时会自动降级到基础模式。")
+
+
 def main():
     parser = argparse.ArgumentParser(description="IndexTTS 2 环境自动安装")
     parser.add_argument("--check", action="store_true", help="只检查状态，不安装")
@@ -269,6 +331,7 @@ def main():
     step_sync(uv, proxy)
     step_checkpoints(uv, proxy)
     step_verify()
+    step_accel(uv, proxy)
 
     log("✓ IndexTTS 2 环境安装完成！")
     log("在 .env 中设置 TTS_ENGINE=index 即可使用（或在 CLI 配置界面切换）")

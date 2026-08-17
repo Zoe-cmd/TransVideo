@@ -535,6 +535,128 @@ class TranslationPipeline:
         tts = create_tts_engine(self.config)
         return tts.synthesize(segments, target_lang, tts_dir)
 
+    # ===== 音频文件夹批量翻译 =====
+
+    AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".wma"}
+
+    def run_audio_folder(self, folder: str, target_lang: str,
+                         source_lang: str = "auto") -> str:
+        """批量翻译音频文件夹：镜像目录结构，逐文件 ASR → 翻译 → 配音 → 合成音频
+
+        输出结构（镜像输入文件夹）：
+          output/{timestamp}_audio/{相对路径}/{文件名}_{lang}.mp3   ← 配音后的音频
+          output/{timestamp}_audio/{相对路径}/{文件名}_{lang}.srt   ← 同级字幕
+
+        每个文件一个独立 work 子目录（.work/{timestamp}_audio/{序号}/），
+        IndexTTS 逐片段克隆该文件自身的原声。
+        """
+        self.config.ensure_dirs()
+        folder = os.path.abspath(folder)
+        if not os.path.isdir(folder):
+            print(f"[audio] ✗ 文件夹不存在: {folder}")
+            return ""
+
+        # 递归收集音频文件（按相对路径排序，保证顺序稳定）
+        audio_files = []
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                if os.path.splitext(name)[1].lower() in self.AUDIO_EXTS:
+                    audio_files.append(os.path.join(root, name))
+        audio_files.sort(key=lambda p: os.path.relpath(p, folder))
+
+        if not audio_files:
+            print(f"[audio] ✗ 文件夹里没有音频文件（支持: {'/'.join(sorted(self.AUDIO_EXTS))}）")
+            return ""
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_output = os.path.join(self.config.output_dir, f"{timestamp}_audio")
+        session_work = os.path.join(self.config.work_dir, f"{timestamp}_audio")
+        Path(session_output).mkdir(parents=True, exist_ok=True)
+        Path(session_work).mkdir(parents=True, exist_ok=True)
+        self.session_output_dir = session_output
+        self.session_work_dir = session_work
+
+        print(f"\n{'='*60}")
+        print(f"  音频文件夹翻译: {len(audio_files)} 个文件 → {target_lang}")
+        print(f"  输出目录: {session_output}")
+        print(f"{'='*60}\n")
+
+        transcriber = create_transcriber(self.config)
+        translator = create_translator(self.config)
+        tts = create_tts_engine(self.config)
+
+        succeeded, failed = 0, []
+        for idx, src_path in enumerate(audio_files, 1):
+            rel = os.path.relpath(src_path, folder)
+            stem = Path(src_path).stem
+            out_rel_dir = os.path.join(session_output, os.path.dirname(rel))
+            Path(out_rel_dir).mkdir(parents=True, exist_ok=True)
+            file_work = os.path.join(session_work, f"{idx:04d}_{self._sanitize_name(stem)[:30]}")
+            Path(file_work).mkdir(parents=True, exist_ok=True)
+
+            print(f"\n[audio] ({idx}/{len(audio_files)}) {rel}")
+
+            try:
+                # 1. 转为 16k 单声道 wav（ASR 友好，也作为 IndexTTS 的参考音频来源，
+                #    文件名 *_audio.wav 会被 IndexTTSEngine._find_original_audio 找到）
+                wav_path = os.path.join(file_work, f"{stem}_audio.wav")
+                subprocess.run(
+                    [self.config.ffmpeg_path, "-y", "-v", "error",
+                     "-i", src_path, "-ac", "1", "-ar", "16000", wav_path],
+                    check=True, capture_output=True)
+
+                # 2. ASR + 断句合并 + 句读边界对齐
+                segments = transcriber.transcribe(wav_path, source_lang)
+                if not segments:
+                    raise RuntimeError("ASR 无结果")
+                from modules.segment_merger import merge_segments, rebalance_segments
+                segments = merge_segments(segments)
+                if getattr(self.config, "segment_sentence_align", True):
+                    segments, _moved = rebalance_segments(segments)
+                save_segments(segments, os.path.join(file_work, "segments_asr.json"))
+
+                # 3. 翻译
+                segments = translator.translate(segments, source_lang, target_lang)
+                save_segments(segments, os.path.join(file_work, f"segments_translated_{target_lang}.json"))
+
+                # 4. 字幕 → 与输出音频同级目录
+                srt_path = os.path.join(out_rel_dir, f"{stem}_{target_lang}.srt")
+                self.subtitle_gen.generate_srt(segments, srt_path)
+
+                # 5. TTS 配音（IndexTTS 逐片段克隆本文件原声）
+                tts_dir = os.path.join(file_work, "tts")
+                tts_results = tts.synthesize(segments, target_lang, tts_dir)
+                if not tts_results:
+                    raise RuntimeError("TTS 无结果")
+
+                # 6. 按原始时长混音（变速对齐到片段时间轴）
+                duration = self.composer.get_video_duration(src_path)
+                mixed_wav = os.path.join(file_work, f"{stem}_mixed.wav")
+                self.composer.mix_tts_audio(tts_results, duration, mixed_wav, None)
+
+                # 7. 转 mp3 输出
+                out_audio = os.path.join(out_rel_dir, f"{stem}_{target_lang}.mp3")
+                subprocess.run(
+                    [self.config.ffmpeg_path, "-y", "-v", "error",
+                     "-i", mixed_wav, "-codec:a", "libmp3lame", "-q:a", "2", out_audio],
+                    check=True, capture_output=True)
+
+                print(f"[audio] ✓ {rel} → {os.path.relpath(out_audio, session_output)}")
+                succeeded += 1
+            except Exception as e:
+                print(f"[audio] ✗ {rel} 失败: {str(e)[:120]}")
+                failed.append(rel)
+
+        print(f"\n{'='*60}")
+        print(f"[audio] 完成: 成功 {succeeded}/{len(audio_files)}")
+        if failed:
+            print(f"[audio] 失败 {len(failed)} 个:")
+            for f in failed:
+                print(f"  - {f}")
+        print(f"[audio] 输出目录: {session_output}")
+        print(f"{'='*60}\n")
+        return session_output if succeeded else ""
+
 
 def run_pipeline(source: str, target_lang: str, **kwargs):
     """便捷入口"""

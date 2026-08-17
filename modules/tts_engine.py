@@ -51,7 +51,9 @@ def _clean_old_tts_files(output_dir: str):
     patterns = ["tts_*.mp3", "tts_*.wav"]
     old_files = []
     for pat in patterns:
-        old_files.extend(glob.glob(os.path.join(output_dir, pat)))
+        # glob.escape：目录名含 [] 等 glob 元字符（如视频标题带 [JEPA]）时
+        # 不转义会导致匹配失败
+        old_files.extend(glob.glob(os.path.join(glob.escape(output_dir), pat)))
     if old_files:
         print(f"[tts] 清理旧 TTS 文件: {len(old_files)} 个")
         for f in old_files:
@@ -392,7 +394,9 @@ class IndexTTSEngine:
         """
         import glob
         work_dir = os.path.dirname(os.path.abspath(output_dir))
-        candidates = glob.glob(os.path.join(work_dir, "*_audio.wav"))
+        # glob.escape：work_dir 名含 [] 等 glob 元字符（如视频标题带 [JEPA]）时
+        # 不转义会被当成字符类，永远匹配不到任何文件
+        candidates = glob.glob(os.path.join(glob.escape(work_dir), "*_audio.wav"))
         return candidates[0] if candidates else ""
 
     def _slice_ref_audio(self, src_audio: str, start: float, end: float, out_path: str) -> bool:
@@ -474,6 +478,8 @@ class IndexTTSEngine:
             "use_fp16": self.config.index_tts_use_fp16,
             "use_deepspeed": self.config.index_tts_use_deepspeed,
             "use_accel": self.config.index_tts_use_accel,
+            "use_cuda_kernel": self.config.index_tts_use_cuda_kernel,
+            "use_torch_compile": self.config.index_tts_use_torch_compile,
             "items": items,
             "result_path": os.path.abspath(result_path),
         }

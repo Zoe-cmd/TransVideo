@@ -37,13 +37,28 @@ def main():
     print(f"[worker] 加载 IndexTTS-2 模型: {model_dir}", flush=True)
     from indextts.infer_v2 import IndexTTS2
 
-    tts = IndexTTS2(
-        cfg_path=cfg_path,
-        model_dir=model_dir,
+    # use_accel: GPT 加速引擎（flash-attn + KV cache + CUDA graph），需 flash-attn
+    # use_cuda_kernel: BigVGAN 声码器融合 kernel，需 nvcc+MSVC，失败自动回退
+    # use_torch_compile: torch.compile 编译 s2mel 扩散模型，需 triton-windows
+    opts = dict(
         use_fp16=bool(job.get("use_fp16", False)),
-        use_cuda_kernel=bool(job.get("use_accel", False)),
+        use_cuda_kernel=bool(job.get("use_cuda_kernel", False)),
         use_deepspeed=bool(job.get("use_deepspeed", False)),
+        use_accel=bool(job.get("use_accel", False)),
+        use_torch_compile=bool(job.get("use_torch_compile", False)),
     )
+    try:
+        tts = IndexTTS2(cfg_path=cfg_path, model_dir=model_dir, **opts)
+    except Exception as e:
+        # 加速依赖缺失（如 flash-attn / triton 未安装）时自动降级为基础模式
+        if opts["use_accel"] or opts["use_torch_compile"] or opts["use_cuda_kernel"]:
+            print(f"[worker] 加速模式初始化失败（{e}），自动降级为基础模式重试", flush=True)
+            opts["use_accel"] = False
+            opts["use_torch_compile"] = False
+            opts["use_cuda_kernel"] = False
+            tts = IndexTTS2(cfg_path=cfg_path, model_dir=model_dir, **opts)
+        else:
+            raise
     print("[worker] 模型加载完成，开始合成", flush=True)
 
     results = []

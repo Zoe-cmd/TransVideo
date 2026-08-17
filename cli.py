@@ -293,18 +293,19 @@ def interactive_main():
             "🌐 翻译抖音 / TikTok 视频",
             "▶️  翻译 YouTube / B站等流媒体视频",
             "📁 翻译本地视频文件",
+            "🎵 翻译音频文件夹（批量）",
             "📝 仅生成字幕（不配音）",
             "⚙️  修改配置",
             "🧹 清理缓存（清空 .work 目录）",
             "🚪 退出",
         ], default=0)
 
-        if choice == 6 or choice is None:
+        if choice == 7 or choice is None:
             print(f"\n{Color.CYAN}再见！{Color.RESET}\n")
             break
-        elif choice == 5:
+        elif choice == 6:
             interactive_clear_cache(config)
-        elif choice == 4:
+        elif choice == 5:
             interactive_config(config)
         elif choice == 0:
             interactive_translate_douyin(config)
@@ -313,6 +314,8 @@ def interactive_main():
         elif choice == 2:
             interactive_translate_video(config)
         elif choice == 3:
+            interactive_translate_audio(config)
+        elif choice == 4:
             interactive_subtitle_only(config)
 
 
@@ -337,7 +340,7 @@ def interactive_translate_douyin(config: Config):
         return
 
     # 目标语言选择
-    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=1)
+    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
     if lang_idx is None:
         return
     target_lang = ["zh", "en", "ja", "ko"][lang_idx]
@@ -416,7 +419,7 @@ def interactive_translate_streaming(config: Config):
         return
 
     # 目标语言
-    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=1)
+    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
     if lang_idx is None:
         return
     target_lang = ["zh", "en", "ja", "ko"][lang_idx]
@@ -491,7 +494,7 @@ def interactive_translate_video(config: Config):
         return
 
     # 目标语言
-    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=1)
+    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
     if lang_idx is None:
         return
     target_lang = ["zh", "en", "ja", "ko"][lang_idx]
@@ -537,6 +540,53 @@ def interactive_translate_video(config: Config):
     pause()
 
 
+def interactive_translate_audio(config: Config):
+    """交互式：批量翻译音频文件夹"""
+    section("🎵 音频文件夹批量翻译")
+    print(f"  {Color.DIM}请输入音频文件夹路径（递归扫描 mp3/wav/m4a/flac/ogg 等）{Color.RESET}")
+    print(f"  {Color.DIM}输出会在 output 下镜像原文件夹结构，字幕生成在配音音频同级目录{Color.RESET}\n")
+
+    folder = input(f"{Color.CYAN}文件夹路径>{Color.RESET} ").strip().strip('"').strip("'")
+    if not folder or not os.path.isdir(folder):
+        warn(f"文件夹不存在: {folder}")
+        pause()
+        return
+
+    # 目标语言
+    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
+    if lang_idx is None:
+        return
+    target_lang = ["zh", "en", "ja", "ko"][lang_idx]
+
+    # 源语言（通常自动检测）
+    source_lang = "auto"
+    if not confirm("自动检测源语言?", default_yes=True):
+        src_idx = choose("源语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
+        if src_idx is None:
+            source_lang = "auto"
+        else:
+            source_lang = ["zh", "en", "ja", "ko"][src_idx]
+
+    if not confirm("\n开始批量翻译?"):
+        warn("已取消")
+        pause()
+        return
+
+    from pipeline import TranslationPipeline
+    pipeline = TranslationPipeline(config)
+    try:
+        result = pipeline.run_audio_folder(
+            folder, target_lang=target_lang, source_lang=source_lang,
+        )
+        if result:
+            success(f"批量翻译完成！输出目录: {result}")
+    except Exception as e:
+        error(f"批量翻译失败: {e}")
+        import traceback
+        traceback.print_exc()
+    pause()
+
+
 def interactive_subtitle_only(config: Config):
     """交互式：仅生成字幕"""
     section("📝 仅生成字幕（不配音）")
@@ -561,7 +611,7 @@ def interactive_subtitle_only(config: Config):
             return
         source = video_path
 
-    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=1)
+    lang_idx = choose("目标语言", ["中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)"], default=0)
     if lang_idx is None:
         return
     target_lang = ["zh", "en", "ja", "ko"][lang_idx]
@@ -1356,6 +1406,16 @@ def cmd_youtube(args):
                  skip_translate=args.skip_translate)
 
 
+def cmd_audio(args):
+    """命令行：批量翻译音频文件夹"""
+    from pipeline import TranslationPipeline
+    config = load_config()
+    config = apply_overrides(config, args)
+    pipeline = TranslationPipeline(config)
+    pipeline.run_audio_folder(args.folder, target_lang=args.target_lang,
+                              source_lang=args.source_lang)
+
+
 def cmd_config(args):
     if args.init:
         path = Path(".env")
@@ -1396,6 +1456,12 @@ def main():
     p_youtube.add_argument("url", help="视频 URL (YouTube/B站/Vimeo 等)")
     add_common_args(p_youtube)
     p_youtube.set_defaults(func=cmd_youtube)
+
+    # 音频文件夹 子命令
+    p_audio = subparsers.add_parser("audio", help="批量翻译音频文件夹（镜像目录结构输出）")
+    p_audio.add_argument("folder", help="音频文件夹路径（递归扫描 mp3/wav/m4a 等）")
+    add_common_args(p_audio)
+    p_audio.set_defaults(func=cmd_audio)
 
     p_config = subparsers.add_parser("config", help="查看配置")
     p_config.add_argument("--init", action="store_true")

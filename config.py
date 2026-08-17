@@ -101,7 +101,12 @@ INDEX_TTS_MODEL_DIR=index-tts/checkpoints
 INDEX_TTS_REF_AUDIO=
 INDEX_TTS_USE_FP16=true
 INDEX_TTS_USE_DEEPSPEED=false
+# GPT 加速引擎 (flash-attn + KV cache + CUDA graph), 需先安装 flash-attn
 INDEX_TTS_USE_ACCEL=false
+# torch.compile 编译 s2mel 扩散模型, 需 pip install triton-windows
+INDEX_TTS_USE_TORCH_COMPILE=false
+# BigVGAN 声码器融合 CUDA kernel, 需本机 CUDA toolkit + MSVC, 失败自动回退
+INDEX_TTS_USE_CUDA_KERNEL=false
 
 # ----- 字幕配置 (黑底白字 YouTube 风格) -----
 SUBTITLE_STYLE=single
@@ -177,6 +182,8 @@ class Config:
     index_tts_use_fp16: bool = True
     index_tts_use_deepspeed: bool = False
     index_tts_use_accel: bool = False
+    index_tts_use_cuda_kernel: bool = False
+    index_tts_use_torch_compile: bool = False
 
     # ===== 字幕 =====
     subtitle_style: str = "single"
@@ -276,6 +283,8 @@ _ENV_KEY_MAP = {
     "index_tts_use_fp16":      ("INDEX_TTS_USE_FP16", bool),
     "index_tts_use_deepspeed": ("INDEX_TTS_USE_DEEPSPEED", bool),
     "index_tts_use_accel":     ("INDEX_TTS_USE_ACCEL", bool),
+    "index_tts_use_cuda_kernel": ("INDEX_TTS_USE_CUDA_KERNEL", bool),
+    "index_tts_use_torch_compile": ("INDEX_TTS_USE_TORCH_COMPILE", bool),
     # 字幕
     "subtitle_style":          ("SUBTITLE_STYLE", str),
     "subtitle_font":           ("SUBTITLE_FONT", str),

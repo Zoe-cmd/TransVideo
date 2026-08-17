@@ -14,6 +14,7 @@
 - [第一次使用：三分钟上手](#第一次使用三分钟上手)
 - [交互界面详解](#交互界面详解)
 - [命令行用法](#命令行用法)
+- [翻译音频文件夹（批量）](#翻译音频文件夹批量)
 - [引擎怎么选](#引擎怎么选)
 - [IndexTTS 2 克隆配音](#indextts-2-克隆配音)
 - [输出产物说明](#输出产物说明)
@@ -129,6 +130,7 @@ python cli.py
 | 🌐 翻译抖音 / TikTok 视频 | 粘贴分享链接（支持抖音口令），自动解析下载 |
 | ▶️ 翻译 YouTube / B站等流媒体视频 | 粘贴链接（国内需先在配置里设代理） |
 | 📁 翻译本地视频文件 | 选择电脑上的视频文件开始处理 |
+| 🎵 翻译音频文件夹（批量） | 输入一个文件夹，递归扫描其中所有音频，批量翻译+配音，**按原目录结构镜像输出** |
 | 📝 仅生成字幕（不配音） | 只走 听写→翻译→烧字幕，不做配音 |
 | ⚙️ 修改配置 | 所有参数的可视化配置，见下表 |
 | 🧹 清理缓存 | 删除 `.work` 下的中间产物（释放磁盘） |
@@ -177,6 +179,9 @@ python cli.py video input.mp4 -t zh --keep-original-audio
 
 # 断点续跑（复用已完成的 ASR/翻译结果）
 python cli.py video input.mp4 -t zh --skip-download --skip-asr --skip-translate
+
+# 批量翻译整个音频文件夹（镜像目录结构输出）
+python cli.py audio "D:\podcasts" -t zh
 ```
 
 常用参数：
@@ -192,6 +197,41 @@ python cli.py video input.mp4 -t zh --skip-download --skip-asr --skip-translate
 | `--subtitle-style` | `single`（仅译文）/ `dual`（双语） |
 | `--subtitle-only` | 只烧字幕不配音 |
 | `--keep-original-audio` | 保留原声作背景 |
+
+## 翻译音频文件夹（批量）
+
+不只是视频——给它一个装满音频的文件夹，它会**递归扫描**所有支持的音频（mp3 / wav / m4a / flac / ogg / aac / opus / wma），逐个完成听写 → 翻译 → 配音 → 输出新音频，并且**完全按照原文件夹的目录结构镜像输出**。
+
+```bash
+python cli.py audio "D:\课程录音" -t zh
+```
+
+假设原文件夹结构：
+
+```
+D:\课程录音\
+├── 第1课.mp3
+└── 进阶\
+    ├── 第2课.wav
+    └── 第3课.m4a
+```
+
+输出（`output\日期时间_audio\` 下）：
+
+```
+output\20260817_023654_audio\
+├── 第1课_zh.mp3        ← 翻译配音后的音频
+├── 第1课_zh.srt        ← 字幕文件，与音频同级
+└── 进阶\
+    ├── 第2课_zh.mp3
+    ├── 第2课_zh.srt
+    ├── 第3课_zh.mp3
+    └── 第3课_zh.srt
+```
+
+- 单个文件失败**不影响其他文件**，最后会汇总成功/失败数
+- 用 IndexTTS 2 配音时同样支持逐片段克隆原声情感
+- 交互界面主菜单选「🎵 翻译音频文件夹（批量）」也可以走同样流程
 
 ## 引擎怎么选
 
@@ -272,6 +312,24 @@ INDEX_TTS_REF_AUDIO=        # 指定一段 3-15 秒清晰人声做固定音色�
 INDEX_TTS_USE_FP16=true     # 半精度，省显存更快
 ```
 
+### 加速选项（速度 / 质量平衡）
+
+觉得逐片段合成慢？IndexTTS-2 内置两条加速路径，在 `.env` 打开即可：
+
+```env
+INDEX_TTS_USE_TORCH_COMPILE=true   # torch.compile 编译扩散模型（s2mel），需 pip install triton-windows==3.1.0.post17
+INDEX_TTS_USE_ACCEL=true           # GPT 解码加速引擎（flash-attn + KV cache + CUDA graph），需 flash-attn
+```
+
+- **torch_compile**：风险最低，收益中等。Windows 下在 index-tts 环境里装 `triton-windows` 即可，首次运行有一次编译预热。
+- **accel**：收益最大（自回归 GPT 解码是耗时大头）。Windows 没有官方 flash-attn 包，需要装社区预编译 wheel——要**严格匹配**你的 torch / CUDA / Python 版本（如 [kingbri1/flash-attention](https://github.com/kingbri1/flash-attention/releases) 提供了 `torch2.8.0+cu128` 的 `flash_attn-2.8.3` Windows wheel）。
+- 两个开关都有**自动降级**：依赖缺失导致初始化失败时会自动回退到基础模式，不会中断任务（日志会提示降级）。
+- 实测参考（RTX 显卡 + fp16，5 秒左右片段）：开启两个加速后稳定态约 **3.9 秒/片段** vs 关闭时约 6.4 秒/片段（≈1.6x）。注意每个配音进程的首个片段有一次性预热开销（CUDA graph 捕获 + 编译，约 30 秒），**片段越多越划算**（约 10 个以上片段开始回本）；跑很短的音频时不开反而更快。
+- `INDEX_TTS_USE_CUDA_KERNEL=true`（BigVGAN 声码器融合 kernel）需要本机 CUDA toolkit + MSVC 编译环境，收益较小，一般不用开。
+- 不推荐 `INDEX_TTS_USE_DEEPSPEED`：Windows 无官方 wheel，需源码编译，官方也提示可能更慢。
+
+打开开关后重跑 `python scripts/setup_indextts.py`，它会自动检测并安装对应的加速依赖（triton-windows / 匹配你 torch 版本的 flash-attn wheel），装不上会提示手动方法，不影响基础功能。
+
 ### 中文路径说明
 
 项目放在中文目录下也能正常用——安装脚本检测到非 ASCII 路径时，会自动把 index-tts 环境建到 `%LOCALAPPDATA%\TransVideo\` 下的纯 ASCII 目录并做路径映射，无需你移动项目。
@@ -309,7 +367,7 @@ A: 所有下载（whisper 模型 / IndexTTS 依赖 / IndexTTS 权重）都内置
 A: 直接重跑 `python scripts/setup_indextts.py`。它是幂等的，已完成的步骤自动跳过，失败的部分自动换下载源重试。
 
 **Q: IndexTTS 2 跑起来很慢 / 爆显存？**
-A: 确认 `INDEX_TTS_USE_FP16=true`；16GB 显存的 4060 Ti 合成一条 5 秒配音约 3-7 秒。显存不足可关闭其他占显存的程序。
+A: 确认 `INDEX_TTS_USE_FP16=true`；16GB 显存的 4060 Ti 合成一条 5 秒配音约 3-7 秒。还想更快可以打开加速选项（`INDEX_TTS_USE_TORCH_COMPILE` / `INDEX_TTS_USE_ACCEL`），见上文「加速选项」一节。显存不足可关闭其他占显存的程序。
 
 **Q: run.bat 双击闪退？**
 A: 请用仓库里的原版。如果改过一次：批处理文件**不能含中文**（除非存成 GBK 编码）且**必须是 CRLF 换行**，否则 cmd 解析会直接退出。
