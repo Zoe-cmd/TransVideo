@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""TTS 配音模块 —— 支持 edge-tts（免费）、Azure TTS 和 IndexTTS 2（本地 GPU）
+"""TTS 配音模块 —— 支持 edge-tts（免费）、Azure TTS 和 IndexTTS 2.5（本地 GPU）
 
 配音策略：
   - 每个片段生成独立音频文件
   - 记录 TTS 实际时长，用于后续对齐
   - 如果 TTS 时长 > 原片段时长，需要标记（合成时变速或留白处理）
 
-IndexTTS 2 通过子进程桥接调用（index_tts_worker.py），
+IndexTTS 2.5 通过子进程桥接调用（index_tts_worker.py），
 使用 index-tts 项目自己的 .venv 环境，与主程序依赖完全隔离。
 """
 
@@ -90,6 +90,54 @@ def _should_skip_text(text: str) -> bool:
         return True
     text_upper = text.upper()
     return any(p in text_upper for p in SKIP_TEXT_PATTERNS)
+
+
+# 非语言人声/拟声词 token 表（呻吟、喘息、笑声、语气词等，无需翻译配音）
+# 中英日韩常见感叹词；匹配前会做规范化（小写、去标点、拉丁词叠音压缩）
+_NONSPEECH_TOKENS = {
+    # 英语
+    "ah", "ahh", "oh", "ohh", "ooh", "hmm", "mm", "hm", "mhm", "uh", "um",
+    "eh", "ha", "haha", "hee", "huh", "wow", "whoa", "shh", "shhh", "psst",
+    "ouch", "ow", "oops", "yay", "yeah", "yep", "nope", "uh-huh", "uh-oh",
+    "hah", "phew", "ugh", "ahhh", "mmm", "hmmm", "ew", "yikes",
+    # 中文（逐字匹配）
+    "啊", "哦", "噢", "嗯", "唔", "唉", "哎", "呀", "哈", "嘿", "哼", "哇",
+    "呜", "嗷", "咦", "嘘", "咯", "嘻", "呵", "嗬", "嘶", "吖",
+    # 日语（假名串整体匹配）
+    "あ", "ああ", "あー", "ん", "んん", "うん", "はあ", "はぁ", "ふふ", "え",
+    "ええ", "お", "わ", "あん", "ふーん", "へえ", "ほう", "うわ", "きゃ",
+    # 韩语
+    "아", "어", "음", "흠", "하", "히", "오", "우", "앗", "에", "허", "휴",
+}
+
+# 非语言人声片段的最大时长：正常句子不会全是语气词，短片段才是
+_NONSPEECH_MAX_DURATION = 6.0
+
+
+def is_nonspeech_vocalization(text: str, duration: float = 0.0) -> bool:
+    """检测文本是否全是拟声词/语气词等非语言人声（此类片段保留原声不配音）
+
+    判定规则：
+      1. 片段时长不超过 _NONSPEECH_MAX_DURATION（长片段几乎不可能全是语气词）
+      2. 去掉标点/空白/音符后，所有 token 都在非语言人声表里
+         （拉丁按词匹配并压缩叠音 ahhh→ah，中日韩按字/假名串匹配）
+    """
+    if not text or not text.strip():
+        return False
+    if duration > _NONSPEECH_MAX_DURATION:
+        return False
+    import re
+    # 拉丁词 / 汉字单字 / 假名串 / 韩文音节串 分 token
+    tokens = re.findall(r"[a-zA-Z]+|[一-鿿]|[぀-ヿ]+|[가-힯]+", text.lower())
+    if not tokens:
+        # 纯标点/音符/空白（如 "♪", "..."）——视为非语言内容
+        return not re.search(r"[0-9０-９]", text)
+    for tok in tokens:
+        # 拉丁叠音压缩：ahhh→ah, mmmm→mm
+        norm = re.sub(r"(.)\1+", r"\1", tok) if tok.isascii() else tok
+        if norm not in _NONSPEECH_TOKENS and tok not in _NONSPEECH_TOKENS:
+            return False
+    return True
 
 
 def _get_audio_duration(ffprobe_path: str, audio_path: str) -> float:
@@ -332,33 +380,45 @@ class AzureTTSEngine:
 
 
 class IndexTTSEngine:
-    """IndexTTS 2 本地 GPU 配音（零样本声音克隆 + 保留源音频情感）
+    """IndexTTS 2.5 本地 GPU 配音（零样本声音克隆 + 保留源音频情感）
 
     工作方式：
       - 主程序与 index-tts 使用两个独立的 Python 环境（index-tts 要求 Python 3.10/3.11
         且依赖重），所以通过子进程桥接：把合成任务写成 JSON，交给
-        index_tts_worker.py 在 index-tts/.venv 中批量执行。
+        index_tts_worker.py 在 index-tts 的虚拟环境中批量执行。
       - 每个片段默认用「原视频中该片段对应的原声切片」同时作为音色参考
         （spk_audio_prompt）和情感参考（emo_audio_prompt），实现克隆说话人
         音色并保留原始情感。
       - 也可在 .env 中配置 INDEX_TTS_REF_AUDIO 指定固定的参考音频。
+      - 优先使用 2.5 权重（checkpoints_25），仅装有旧版 2.0 权重时自动回退。
     """
 
     # index-tts 仓库相对项目根目录的默认位置
     DEFAULT_REPO_DIR = "index-tts"
+    DEFAULT_MODEL_DIR = "index-tts/checkpoints"
     # 参考切片最长时长（秒），过长的参考不会带来更好效果还更慢
     MAX_REF_DURATION = 15.0
 
     def __init__(self, config: Config):
         self.config = config
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.repo_dir = os.path.join(self.project_root, self.DEFAULT_REPO_DIR)
+        from modules.indextts_setup import (ascii_alias, detect_version,
+                                            checkpoints_25_dir, checkpoints_dir, repo_dir)
+        self.repo_dir = repo_dir()
         self.python_path = self._find_index_python()
-        model_dir = config.index_tts_model_dir
-        if not os.path.isabs(model_dir):
-            model_dir = os.path.join(self.project_root, model_dir)
+
+        cfg_dir = config.index_tts_model_dir
+        if cfg_dir != self.DEFAULT_MODEL_DIR:
+            # 用户显式指定了模型目录：按 2.5 特征文件（codec.pth）判断版本
+            model_dir = cfg_dir
+            if not os.path.isabs(model_dir):
+                model_dir = os.path.join(self.repo_dir, model_dir)
+            self.version = "2.5" if os.path.isfile(os.path.join(model_dir, "codec.pth")) else "2"
+        else:
+            # 默认目录：自动检测已安装的版本（2.5 优先，2.0 回退）
+            self.version = detect_version()
+            model_dir = checkpoints_25_dir() if self.version == "2.5" else checkpoints_dir()
         # 中文等非 ASCII 路径转 ASCII junction（sentencepiece 等 C++ 扩展 fopen 中文路径会失败）
-        from modules.indextts_setup import ascii_alias
         self.model_dir = ascii_alias(model_dir)
         self.worker_path = os.path.join(self.project_root, "index_tts_worker.py")
 
@@ -370,10 +430,10 @@ class IndexTTSEngine:
                 "  python scripts/setup_indextts.py\n"
                 "或在 CLI 交互界面「TTS 配音配置 → 安装 / 检测 IndexTTS 环境」一键安装"
             )
-        if not os.path.isfile(os.path.join(self.model_dir, "config.yaml")):
+        if not self.version or not os.path.isfile(os.path.join(self.model_dir, "config.yaml")):
             raise RuntimeError(
-                f"IndexTTS-2 模型文件不完整: {self.model_dir}\n"
-                "请运行自动安装脚本下载模型权重（约 5GB）:\n"
+                f"IndexTTS 模型文件不完整: {self.model_dir}\n"
+                "请运行自动安装脚本下载 IndexTTS-2.5 模型权重（约 6GB）:\n"
                 "  python scripts/setup_indextts.py"
             )
 
@@ -388,7 +448,8 @@ class IndexTTSEngine:
         return index_python()
 
     def _find_original_audio(self, output_dir: str) -> str:
-        """查找流水线提取的原始音频（work_dir 下的 *_audio.wav）
+        """查找流水线的参考音频：优先人声轨（*_vocals.wav，人声分离模式），
+        否则用提取的原始音频（*_audio.wav）。
 
         output_dir 是 work_dir/tts，原始音频在其上一级目录。
         """
@@ -396,8 +457,11 @@ class IndexTTSEngine:
         work_dir = os.path.dirname(os.path.abspath(output_dir))
         # glob.escape：work_dir 名含 [] 等 glob 元字符（如视频标题带 [JEPA]）时
         # 不转义会被当成字符类，永远匹配不到任何文件
-        candidates = glob.glob(os.path.join(glob.escape(work_dir), "*_audio.wav"))
-        return candidates[0] if candidates else ""
+        for pat in ("*_vocals.wav", "*_audio.wav"):
+            candidates = glob.glob(os.path.join(glob.escape(work_dir), pat))
+            if candidates:
+                return candidates[0]
+        return ""
 
     def _slice_ref_audio(self, src_audio: str, start: float, end: float, out_path: str) -> bool:
         """用 ffmpeg 从原始音频切出 [start, end] 片段作为参考音频"""
@@ -424,9 +488,9 @@ class IndexTTSEngine:
         fixed_ref = self.config.index_tts_ref_audio
         original_audio = "" if fixed_ref else self._find_original_audio(output_dir)
         if fixed_ref:
-            print(f"[tts] IndexTTS 2 配音: 使用固定参考音频 {fixed_ref}")
+            print(f"[tts] IndexTTS {self.version} 配音: 使用固定参考音频 {fixed_ref}")
         elif original_audio:
-            print(f"[tts] IndexTTS 2 配音: 逐片段克隆原声（{os.path.basename(original_audio)}），保留情感")
+            print(f"[tts] IndexTTS {self.version} 配音: 逐片段克隆原声（{os.path.basename(original_audio)}），保留情感")
         else:
             raise RuntimeError(
                 "IndexTTS 需要参考音频：未找到原始音频切片来源。\n"
@@ -469,12 +533,16 @@ class IndexTTSEngine:
             print("[tts] 没有需要合成的片段")
             return []
 
-        print(f"[tts] IndexTTS 2 批量合成 {len(items)} 个片段（子进程: {os.path.basename(self.repo_dir)}/.venv）")
+        print(f"[tts] IndexTTS {self.version} 批量合成 {len(items)} 个片段（子进程: {os.path.basename(self.repo_dir)}/.venv）")
 
+        # 2.5 需要显式指定合成文本的语言（中/英/日/西/阿等，tokenizer 支持更多）
+        lang = (target_lang or "zh").upper()
         job_path = os.path.join(output_dir, "_index_tts_job.json")
         result_path = os.path.join(output_dir, "_index_tts_result.json")
         job = {
             "model_dir": os.path.abspath(self.model_dir),
+            "version": self.version,
+            "lang": lang,
             "use_fp16": self.config.index_tts_use_fp16,
             "use_deepspeed": self.config.index_tts_use_deepspeed,
             "use_accel": self.config.index_tts_use_accel,

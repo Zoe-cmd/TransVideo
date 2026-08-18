@@ -48,3 +48,10 @@ Desktop.ini
 
 # IndexTTS 2（体积大，由 scripts/setup_indextts.py 或 CLI 配置界面自动安装）
 index-tts/
+
+# 自动下载的工具（deno 等 JS 运行时）
+.tools/
+
+# YouTube cookies（含登录态，敏感）
+cookies.txt
+*.cookies.txt

@@ -96,9 +96,13 @@ TTS_VOICE_KO=ko-KR-InJoonNeural
 TTS_RATE=+0%
 TTS_VOLUME=+0%
 
-# ----- IndexTTS 2 (本地 GPU, 保留源音频情感, 需首次搭建环境) -----
+# ----- IndexTTS 2.5 (本地 GPU, 零样本声音克隆 + 保留源音频情感; CLI 配置界面可一键自动安装) -----
+# 仓库目录: 默认项目内 index-tts/; 可指向外部目录供多个项目共享, 如 INDEX_TTS_REPO_DIR=C:/Users/xxx/public/index-tts
+INDEX_TTS_REPO_DIR=
+# 模型目录: 默认自动检测（checkpoints_25 优先, 旧版 checkpoints 回退）, 一般无需修改
 INDEX_TTS_MODEL_DIR=index-tts/checkpoints
 INDEX_TTS_REF_AUDIO=
+# 半精度推理 (2.5 用 BF16, 2.0 用 FP16), 更快更省显存, 质量损失极小
 INDEX_TTS_USE_FP16=true
 INDEX_TTS_USE_DEEPSPEED=false
 # GPT 加速引擎 (flash-attn + KV cache + CUDA graph), 需先安装 flash-attn
@@ -123,6 +127,16 @@ SUBTITLE_MAX_LINES=2
 AUDIO_KEEP_ORIGINAL=false
 AUDIO_ORIGINAL_VOLUME=0.15
 
+# ----- 人声分离（保留背景音，适合 ASMR/带BGM 视频） -----
+# 开启后：分离人声轨+伴奏轨，只替换人声，背景音全音量保留
+# 首次使用自动安装 audio-separator 并下载分离模型（进度实时可见）
+SEPARATE_VOCALS=false
+VOCAL_SEPARATION_MODEL=UVR-MDX-NET-Voc_FT.onnx
+# 拟声词/非语言人声（喘息、笑声、语气词等）保留原声不配音
+KEEP_NONSPEECH_ORIGINAL=true
+# 分离模式下的伴奏音量（1.0=原音量）
+ACCOMPANIMENT_VOLUME=1.0
+
 # ----- Google 翻译 -----
 GOOGLE_TRANSLATE_URL=https://translate.googleapis.com/translate_a/single
 
@@ -130,6 +144,8 @@ GOOGLE_TRANSLATE_URL=https://translate.googleapis.com/translate_a/single
 NETWORK_PROXY=
 NETWORK_TIMEOUT=60
 TIKTOK_COOKIES_BROWSER=
+# YouTube cookies.txt（浏览器扩展导出的 cookie 文件, 被风控时免关浏览器带登录态下载）
+YOUTUBE_COOKIES_FILE=
 """
 
 
@@ -202,6 +218,17 @@ class Config:
     keep_original_audio: bool = False
     original_audio_volume: float = 0.15
 
+    # ===== 人声分离（保留背景音） =====
+    # 开启后：先把音频分离成人声轨+伴奏轨，ASR/克隆参考都用人声轨，
+    # 最终音轨 = 配音人声 + 原伴奏（全音量），适合 ASMR/带 BGM 的视频
+    separate_vocals: bool = False
+    # 分离模型（audio-separator / UVR 模型名）
+    vocal_separation_model: str = "UVR-MDX-NET-Voc_FT.onnx"
+    # 拟声词/非语言人声（呻吟、喘息、笑声、语气词等）保留原声不配音
+    keep_nonspeech_original: bool = True
+    # 分离模式下伴奏音量（1.0 = 原音量）
+    accompaniment_volume: float = 1.0
+
     # ===== 断句 =====
     # ASR 片段句读边界对齐：把结尾没说完的残句挪给下一片段，让每段都是完整句子
     segment_sentence_align: bool = True
@@ -213,6 +240,9 @@ class Config:
     network_proxy: str = ""
     network_timeout: int = 60
     tiktok_cookies_browser: str = ""
+    # YouTube cookies.txt 文件路径（浏览器扩展导出的 Netscape 格式 cookie 文件，
+    # 被风控时无需关闭浏览器即可带登录态下载，优先级高于浏览器自动提取）
+    youtube_cookies_file: str = ""
 
     # ===== 配置文件路径 =====
     config_file_path: str = ""
@@ -300,12 +330,18 @@ _ENV_KEY_MAP = {
     "keep_original_audio":     ("AUDIO_KEEP_ORIGINAL", bool),
     "segment_sentence_align":  ("SEGMENT_SENTENCE_ALIGN", bool),
     "original_audio_volume":   ("AUDIO_ORIGINAL_VOLUME", float),
+    # 人声分离
+    "separate_vocals":         ("SEPARATE_VOCALS", bool),
+    "vocal_separation_model":  ("VOCAL_SEPARATION_MODEL", str),
+    "keep_nonspeech_original": ("KEEP_NONSPEECH_ORIGINAL", bool),
+    "accompaniment_volume":    ("ACCOMPANIMENT_VOLUME", float),
     # Google
     "google_translate_url":    ("GOOGLE_TRANSLATE_URL", str),
     # 网络
     "network_proxy":           ("NETWORK_PROXY", str),
     "network_timeout":         ("NETWORK_TIMEOUT", int),
     "tiktok_cookies_browser":  ("TIKTOK_COOKIES_BROWSER", str),
+    "youtube_cookies_file":    ("YOUTUBE_COOKIES_FILE", str),
 }
 
 # 反向映射：.env 键名 → Config 字段名

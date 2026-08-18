@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""IndexTTS 2 环境自动安装脚本
+"""IndexTTS 2.5 环境自动安装脚本
 
 用法：
   python scripts/setup_indextts.py              # 完整安装（已装的部分自动跳过）
@@ -8,10 +8,11 @@
 
 安装步骤（幂等，可重复运行）：
   1. 检查 git / uv（uv 缺失时自动 pip install）
-  2. 克隆 index-tts 仓库到 index-tts/
+  2. 克隆 index-tts 仓库（v2.5.0 标签）到 index-tts/；旧版检出自动升级
   3. uv sync 安装依赖（Python 3.11 + CUDA torch）
-  4. 下载 IndexTTS-2 模型权重到 index-tts/checkpoints（约 5GB）
+  4. 下载 IndexTTS-2.5 模型权重到 index-tts/checkpoints_25（约 6GB）
   5. 验证 GPU / torch 可用性
+  6. 按 .env 开关安装可选加速依赖（triton / flash-attn）
 
 下载源回退策略：
   - 配置了代理（.env 的 NETWORK_PROXY 或 --proxy）：先用「代理 + 官方源」
@@ -35,11 +36,16 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from modules.indextts_setup import (  # noqa: E402
-    REPO_DIR, checkpoints_dir, index_python, status, venv_dir,
+    CKPT25_DIR_NAME, checkpoints_25_dir, checkpoints_dir, index_python, repo_dir,
+    status, venv_dir,
 )
 
+# 仓库目录（支持 .env 的 INDEX_TTS_REPO_DIR 指向外部共享目录）
+REPO_DIR = repo_dir()
+
 REPO_URL = "https://github.com/index-tts/index-tts.git"
-MODEL_ID = "IndexTeam/IndexTTS-2"
+REPO_TAG = "v2.5.0"
+MODEL_ID = "IndexTeam/IndexTTS-2.5"
 
 # 国内镜像
 ALIYUN_PYPI = "https://mirrors.aliyun.com/pypi/simple"
@@ -107,8 +113,21 @@ def ensure_uv(env: dict) -> str:
 
 def step_clone(proxy: str):
     if os.path.isdir(REPO_DIR):
-        log("index-tts 仓库已存在，跳过克隆")
-        return
+        # 已存在但缺少 2.5 推理代码（旧版 2.0 检出）→ 升级到 v2.5.0 标签
+        if os.path.isfile(os.path.join(REPO_DIR, "indextts", "infer_v2_5.py")):
+            log("index-tts 仓库已存在（含 2.5 代码），跳过克隆")
+            return
+        log("检测到旧版 index-tts 仓库，升级到 v2.5.0 ...")
+        attempts = []
+        if proxy:
+            attempts.append(("代理", build_env(proxy)))
+        attempts.append(("直连", build_env()))
+        for label, e in attempts:
+            log(f"尝试{label}拉取...")
+            if (run(["git", "fetch", "--tags", "origin"], cwd=REPO_DIR, env=e)
+                    and run(["git", "checkout", REPO_TAG], cwd=REPO_DIR, env=e)):
+                return
+        raise RuntimeError("仓库升级失败，请检查网络或在 .env 中配置 NETWORK_PROXY 后重试")
     if not shutil.which("git"):
         raise RuntimeError("未找到 git，请先安装 Git: https://git-scm.com")
     log("克隆 index-tts 仓库...")
@@ -119,7 +138,7 @@ def step_clone(proxy: str):
     attempts.append(("直连", build_env()))
     for label, e in attempts:
         log(f"尝试{label}克隆...")
-        if run(["git", "clone", REPO_URL, REPO_DIR], env=e):
+        if run(["git", "clone", "--branch", REPO_TAG, REPO_URL, REPO_DIR], env=e):
             return
     raise RuntimeError("git clone 失败，请检查网络或在 .env 中配置 NETWORK_PROXY 后重试")
 
@@ -139,10 +158,11 @@ def _patch_pytorch_index(mirror_url: str):
 
 def step_sync(uv: str, proxy: str):
     py = index_python()
-    # 已装好则跳过
+    # 已装好则跳过（同时验证已安装的 indextts 包含 2.5 推理代码——
+    # --no-editable 安装的是构建快照，仓库升级后必须重新 sync）
     if os.path.isfile(py):
         probe = subprocess.run(
-            [py, "-c", "import torch, indextts; print(torch.__version__)"],
+            [py, "-c", "import torch, indextts; from indextts import infer_v2_5; print(torch.__version__)"],
             capture_output=True, text=True)
         if probe.returncode == 0:
             log(f"依赖已安装（torch {probe.stdout.strip()}），跳过 uv sync")
@@ -194,28 +214,33 @@ def step_checkpoints(uv: str, proxy: str):
     if ok:
         log("模型权重已完整，跳过下载")
         return
-    ckpt = checkpoints_dir()
+    ckpt = checkpoints_25_dir()
     os.makedirs(ckpt, exist_ok=True)
-    log(f"下载 IndexTTS-2 模型权重（约 5.5GB）: {detail}")
+    log(f"下载 IndexTTS-2.5 模型权重（约 6GB）: {detail}")
 
     attempts = []
     # 配置了代理：优先 HuggingFace 官方 + 代理
+    # 注意必须禁用 hf_xet：xet 分块传输走独立通道绕过 HTTP(S)_PROXY，
+    # 国内直连 transfer.xethub.hf.co 会卡死；禁用后回退到普通 CDN 下载，走代理
     if proxy:
+        env_hf = build_env(proxy)
+        env_hf["HF_HUB_DISABLE_XET"] = "1"
         attempts.append(("HuggingFace (代理)",
-                         [uv, "tool", "run", "--from", "huggingface-hub[cli,hf_xet]",
-                          "hf", "download", MODEL_ID, "--local-dir", "checkpoints"],
-                         build_env(proxy)))
+                         [uv, "tool", "run", "--from", "huggingface-hub[cli]",
+                          "hf", "download", MODEL_ID, "--local-dir", CKPT25_DIR_NAME],
+                         env_hf))
     # 国内镜像：ModelScope（indextts 依赖自带 modelscope）
     attempts.append(("ModelScope (国内直连)",
                      [uv, "run", "modelscope", "download", "--model", MODEL_ID,
-                      "--local_dir", "checkpoints"],
+                      "--local_dir", CKPT25_DIR_NAME],
                      build_env()))
-    # hf-mirror 兜底
+    # hf-mirror 兜底（同样禁用 xet，镜像不支持 xet 协议）
     env_mirror = build_env()
     env_mirror["HF_ENDPOINT"] = HF_MIRROR
+    env_mirror["HF_HUB_DISABLE_XET"] = "1"
     attempts.append(("hf-mirror 镜像",
-                     [uv, "tool", "run", "--from", "huggingface-hub[cli,hf_xet]",
-                      "hf", "download", MODEL_ID, "--local-dir", "checkpoints"],
+                     [uv, "tool", "run", "--from", "huggingface-hub[cli]",
+                          "hf", "download", MODEL_ID, "--local-dir", CKPT25_DIR_NAME],
                      env_mirror))
 
     for label, cmd, e in attempts:
@@ -229,7 +254,7 @@ def step_checkpoints(uv: str, proxy: str):
         "建议在 .env 中配置 NETWORK_PROXY（如 http://127.0.0.1:7897）后重试:\n"
         "  python scripts/setup_indextts.py\n"
         "或手动执行:\n"
-        "  cd index-tts && uv run modelscope download --model IndexTeam/IndexTTS-2 --local_dir checkpoints")
+        f"  cd index-tts && uv run modelscope download --model {MODEL_ID} --local_dir {CKPT25_DIR_NAME}")
 
 
 def step_verify():
@@ -295,6 +320,8 @@ def step_accel(uv: str, proxy: str):
                 log("✗ 无法探测 torch 版本，跳过 flash-attn 安装")
                 return
             torch_ver, cuda_ver, py_tag = info.split()
+            # torch_ver 可能带本地版本后缀（如 2.8.0+cu128），wheel 文件名里不能要
+            torch_ver = torch_ver.split("+")[0]
             cu = "cu" + cuda_ver.replace(".", "")
             url = (f"{FLASH_ATTN_REPO_RELEASE}/flash_attn-2.8.3+{cu}torch{torch_ver}"
                    f"cxx11abiFALSE-{py_tag}-{py_tag}-win_amd64.whl")
@@ -306,8 +333,61 @@ def step_accel(uv: str, proxy: str):
                 log("  装不上也不影响使用——配音时会自动降级到基础模式。")
 
 
+def _save_repo_dir_to_env(path: str):
+    """把 INDEX_TTS_REPO_DIR 写入项目 .env（已存在则替换该行）"""
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    lines = []
+    if os.path.isfile(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().split("\n")
+    key = "INDEX_TTS_REPO_DIR"
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(key + "="):
+            lines[i] = f"{key}={path}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{key}={path}")
+    with open(env_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines))
+    log(f"已写入 .env: {key}={path}")
+
+
+def step_ask_repo_dir():
+    """首次安装时询问 index-tts 安装目录（默认当前项目下）
+
+    仅在交互式终端、未配置 INDEX_TTS_REPO_DIR 且默认目录还不存在时提问。
+    用户输入自定义目录则写入 .env，之后所有项目共用这一份。
+    """
+    global REPO_DIR
+    from modules.indextts_setup import _read_env_value
+    if _read_env_value("INDEX_TTS_REPO_DIR"):
+        return  # 已配置共享目录，直接用
+    if os.path.isdir(REPO_DIR):
+        return  # 默认位置已有仓库（老用户），不打扰
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return  # 非交互环境（脚本/CI）不提问
+
+    print("\n[setup] IndexTTS 需要约 16GB 磁盘空间（代码 + 环境 + 模型权重）。")
+    print("[setup] 如果你有多个项目都要用 IndexTTS，可以装到公共目录共享一份。")
+    try:
+        answer = input(f"[setup] 安装目录（直接回车 = 默认 {REPO_DIR}）: ").strip().strip('"').strip("'")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+        print()
+    if answer:
+        if not os.path.isabs(answer):
+            answer = os.path.join(PROJECT_ROOT, answer)
+        answer = os.path.normpath(answer)
+        _save_repo_dir_to_env(answer)
+        REPO_DIR = answer
+        # 同步到当前进程环境，让 indextts_setup 的路径函数立刻生效
+        os.environ["INDEX_TTS_REPO_DIR"] = answer
+
+
 def main():
-    parser = argparse.ArgumentParser(description="IndexTTS 2 环境自动安装")
+    parser = argparse.ArgumentParser(description="IndexTTS 2.5 环境自动安装")
     parser.add_argument("--check", action="store_true", help="只检查状态，不安装")
     parser.add_argument("--proxy", default=None, help="下载代理，如 http://127.0.0.1:7897")
     args = parser.parse_args()
@@ -320,7 +400,9 @@ def main():
         sys.exit(0 if all_ok else 1)
 
     proxy = load_proxy(args.proxy)
+    step_ask_repo_dir()
     log(f"项目目录: {PROJECT_ROOT}")
+    log(f"仓库目录: {REPO_DIR}")
     log(f"虚拟环境: {venv_dir()}")
     log(f"代理: {proxy or '(未配置)'}")
 
@@ -333,7 +415,7 @@ def main():
     step_verify()
     step_accel(uv, proxy)
 
-    log("✓ IndexTTS 2 环境安装完成！")
+    log("✓ IndexTTS 2.5 环境安装完成！")
     log("在 .env 中设置 TTS_ENGINE=index 即可使用（或在 CLI 配置界面切换）")
 
 

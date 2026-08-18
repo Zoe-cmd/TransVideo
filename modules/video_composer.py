@@ -171,17 +171,19 @@ class VideoComposer:
 
     def _mix_with_numpy(self, tts_results: List[TTSResult],
                         total_duration: float, output_path: str,
-                        original_audio_path: Optional[str] = None) -> str:
+                        original_audio_path: Optional[str] = None,
+                        original_volume: Optional[float] = None) -> str:
         """用 numpy 混合音频（快速，含重采样 + 音量标准化）"""
         total_samples = int(total_duration * self.sample_rate)
         mixed = np.zeros(total_samples, dtype=np.float32)
 
-        # 可选：加载原音频（降音）
+        # 可选：加载原音频/伴奏（original_volume 未指定时用配置的原声音量）
+        vol = self.config.original_audio_volume if original_volume is None else original_volume
         if original_audio_path and os.path.isfile(original_audio_path):
             orig = self._read_wav_resampled(original_audio_path, self.sample_rate)
             if len(orig) < total_samples:
                 orig = np.pad(orig, (0, total_samples - len(orig)))
-            mixed += orig[:total_samples] * self.config.original_audio_volume
+            mixed += orig[:total_samples] * vol
 
         # 放置每个 TTS 片段（重采样到 self.sample_rate）
         placed_count = 0
@@ -226,7 +228,8 @@ class VideoComposer:
 
     def _mix_with_array(self, tts_results: List[TTSResult],
                         total_duration: float, output_path: str,
-                        original_audio_path: Optional[str] = None) -> str:
+                        original_audio_path: Optional[str] = None,
+                        original_volume: Optional[float] = None) -> str:
         """用 array 模块混合音频（无 numpy 时的回退）"""
         total_samples = int(total_duration * self.sample_rate)
         # 用 int32 存储避免溢出
@@ -235,7 +238,8 @@ class VideoComposer:
 
         if original_audio_path and os.path.isfile(original_audio_path):
             orig = self._read_wav_array(original_audio_path)
-            vol = int(self.config.original_audio_volume * 32768)
+            base_vol = self.config.original_audio_volume if original_volume is None else original_volume
+            vol = int(base_vol * 32768)
             end = min(len(orig), total_samples)
             for i in range(end):
                 mixed[i] += (orig[i] * vol) >> 15
@@ -323,8 +327,14 @@ class VideoComposer:
 
     def mix_tts_audio(self, tts_results: List[TTSResult],
                       total_duration: float, output_path: str,
-                      original_audio_path: Optional[str] = None) -> str:
-        """混合 TTS 片段到完整音轨"""
+                      original_audio_path: Optional[str] = None,
+                      original_volume: Optional[float] = None) -> str:
+        """混合 TTS 片段到完整音轨
+
+        original_audio_path: 背景音轨（原音频或分离出的伴奏）
+        original_volume: 背景音量覆盖；None 时用配置的原声音量（0.15）。
+                         人声分离模式下传 accompaniment_volume（默认 1.0）。
+        """
         print(f"[compose] 混合音频: {len(tts_results)} 个片段, 总时长 {total_duration:.1f}s")
 
         # 先将所有 MP3 转为 WAV
@@ -361,9 +371,9 @@ class VideoComposer:
 
         # 混合
         if HAS_NUMPY:
-            self._mix_with_numpy(wav_results, total_duration, output_path, original_audio_path)
+            self._mix_with_numpy(wav_results, total_duration, output_path, original_audio_path, original_volume)
         else:
-            self._mix_with_array(wav_results, total_duration, output_path, original_audio_path)
+            self._mix_with_array(wav_results, total_duration, output_path, original_audio_path, original_volume)
 
         print(f"[compose] 音轨已生成: {output_path}")
         return output_path

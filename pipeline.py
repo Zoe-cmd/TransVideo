@@ -297,8 +297,17 @@ class TranslationPipeline:
         # ===== 步骤 2: 提取音频 =====
         audio_path = self._step_extract_audio(video_path, work_dir, source)
 
+        # ===== 步骤 2.5: 人声分离（可选，保留背景音） =====
+        # 分离后人声轨用于 ASR 和 TTS 克隆参考，伴奏轨在混音时全音量保留
+        vocals_path = ""
+        accompaniment_path = ""
+        if self.config.separate_vocals:
+            vocals_path, accompaniment_path = self._step_separate_vocals(
+                audio_path, work_dir, base_name)
+        asr_audio = vocals_path or audio_path
+
         # ===== 步骤 3: ASR 语音识别 =====
-        segments = self._step_transcribe(audio_path, source_lang, work_dir, skip_asr)
+        segments = self._step_transcribe(asr_audio, source_lang, work_dir, skip_asr)
         if not segments:
             print("[pipeline] ASR 无结果，退出")
             return ""
@@ -325,8 +334,12 @@ class TranslationPipeline:
             self.composer.compose_subtitle_only(video_path, ass_path, output_path)
         else:
             # ===== 步骤 6: TTS 配音 =====
+            # 拟声词/非语言人声保留原声：用分离后的人声轨做切片源（未分离时用原始音频）
+            keep_src = ""
+            if self.config.keep_nonspeech_original:
+                keep_src = vocals_path or audio_path
             tts_dir = os.path.join(work_dir, "tts")
-            tts_results = self._step_tts(segments, target_lang, tts_dir)
+            tts_results = self._step_tts(segments, target_lang, tts_dir, keep_src)
 
             if not tts_results:
                 print("[pipeline] TTS 无结果，回退到仅字幕模式")
@@ -336,16 +349,24 @@ class TranslationPipeline:
                 duration = self.composer.get_video_duration(video_path)
                 mixed_audio = os.path.join(work_dir, f"{base_name}_mixed.wav")
 
-                # 保留原音频时，先提取原音
-                orig_audio_path = None
-                if keep_original_audio:
-                    orig_audio_path = os.path.join(work_dir, f"{base_name}_orig.wav")
-                    extract_audio(video_path, orig_audio_path, self.config)
+                if accompaniment_path:
+                    # 人声分离模式：伴奏全音量保留（无人声残留，不会双重人声）
+                    self.composer.mix_tts_audio(
+                        tts_results, duration, mixed_audio, accompaniment_path,
+                        original_volume=self.config.accompaniment_volume)
+                    self.composer.compose_video(
+                        video_path, mixed_audio, ass_path, output_path, False)
+                else:
+                    # 保留原音频时，先提取原音
+                    orig_audio_path = None
+                    if keep_original_audio:
+                        orig_audio_path = os.path.join(work_dir, f"{base_name}_orig.wav")
+                        extract_audio(video_path, orig_audio_path, self.config)
 
-                self.composer.mix_tts_audio(tts_results, duration, mixed_audio, orig_audio_path)
-                self.composer.compose_video(
-                    video_path, mixed_audio, ass_path, output_path, keep_original_audio
-                )
+                    self.composer.mix_tts_audio(tts_results, duration, mixed_audio, orig_audio_path)
+                    self.composer.compose_video(
+                        video_path, mixed_audio, ass_path, output_path, keep_original_audio
+                    )
 
         # 复制字幕文件到输出目录
         out_ass = os.path.join(self.session_output_dir, f"{base_name}_{target_lang}.ass")
@@ -527,13 +548,79 @@ class TranslationPipeline:
         save_segments(segments, segments_path)
         return segments
 
-    def _step_tts(self, segments: list, target_lang: str, tts_dir: str) -> list:
-        """步骤6: TTS 配音"""
+    def _step_separate_vocals(self, audio_path: str, work_dir: str, base_name: str):
+        """步骤2.5: 人声分离 → (人声轨路径, 伴奏轨路径)；失败返回 ("", "")
+
+        分离失败不中断流程：打印警告并回退到不分离模式。
+        """
+        print("\n" + "=" * 60)
+        print("  步骤 2.5: 人声分离（保留背景音）")
+        print("=" * 60)
+        from modules.vocal_separator import separate_vocals
+        vocals, accomp = separate_vocals(
+            audio_path, work_dir, base_name,
+            model_name=self.config.vocal_separation_model,
+            proxy=self.config.network_proxy)
+        if not vocals:
+            print("[pipeline] ⚠ 人声分离失败，回退到普通模式（不保留背景音）")
+            return "", ""
+        return vocals, accomp
+
+    def _step_tts(self, segments: list, target_lang: str, tts_dir: str,
+                  keep_src_audio: str = "") -> list:
+        """步骤6: TTS 配音
+
+        keep_src_audio: 非空时启用拟声词/非语言人声保留——
+        检测为纯语气词/拟声词的短片段不配音，直接从该音频切对应时段原声。
+        """
         print("\n" + "=" * 60)
         print("  步骤 6/7: TTS 配音")
         print("=" * 60)
         tts = create_tts_engine(self.config)
-        return tts.synthesize(segments, target_lang, tts_dir)
+        return self._tts_with_keep_original(tts, segments, target_lang, tts_dir, keep_src_audio)
+
+    def _tts_with_keep_original(self, tts, segments: list, target_lang: str,
+                                tts_dir: str, keep_src_audio: str = "") -> list:
+        """TTS 配音 + 拟声词原声保留（视频/音频两条流水线共用）"""
+        if not keep_src_audio or not os.path.isfile(keep_src_audio):
+            return tts.synthesize(segments, target_lang, tts_dir)
+
+        # 拆分：可翻译片段 → TTS；非语言人声片段 → 原声切片
+        from modules.tts_engine import is_nonspeech_vocalization, TTSResult
+        keep_idx = [i for i, s in enumerate(segments)
+                    if is_nonspeech_vocalization(s.text, s.duration)]
+        if not keep_idx:
+            return tts.synthesize(segments, target_lang, tts_dir)
+
+        print(f"[tts] 拟声词/非语言人声保留原声: {len(keep_idx)} 个片段不配音")
+        sub_segments = [s for i, s in enumerate(segments) if i not in keep_idx]
+        results = tts.synthesize(sub_segments, target_lang, tts_dir) if sub_segments else []
+
+        # 原声切片（命名 keep_XXXXX.wav，避免与 TTS 输出重名）
+        Path(tts_dir).mkdir(parents=True, exist_ok=True)
+        for i in keep_idx:
+            seg = segments[i]
+            slice_path = os.path.join(tts_dir, f"keep_{i:05d}.wav")
+            ok = subprocess.run(
+                [self.config.ffmpeg_path, "-y", "-v", "error",
+                 "-ss", f"{seg.start:.3f}", "-to", f"{seg.end:.3f}",
+                 "-i", keep_src_audio, "-ac", "1", "-ar", "44100", slice_path],
+                capture_output=True).returncode == 0
+            if ok and os.path.isfile(slice_path) and os.path.getsize(slice_path) > 100:
+                results.append(TTSResult(
+                    index=i, audio_path=slice_path,
+                    start=seg.start, end=seg.end,
+                    tts_duration=seg.duration,  # 原声切片时长=原片段时长，无需变速
+                    text=seg.translated_text or seg.text))
+                print(f"[tts]   片段 {i} 保留原声: {seg.text[:30]}")
+            else:
+                print(f"[tts]   片段 {i} 原声切片失败，该时段将静音")
+
+        # 按时间排序后重排 index（混音步骤用 index 命名中间文件，避免重名覆盖）
+        results.sort(key=lambda r: r.start)
+        for n, r in enumerate(results):
+            r.index = n
+        return results
 
     # ===== 音频文件夹批量翻译 =====
 
@@ -584,6 +671,13 @@ class TranslationPipeline:
         transcriber = create_transcriber(self.config)
         translator = create_translator(self.config)
         tts = create_tts_engine(self.config)
+        # 人声分离器按需自动安装（仅开启分离模式时）
+        separate = self.config.separate_vocals
+        if separate:
+            from modules.vocal_separator import ensure_available
+            if not ensure_available(self.config.network_proxy):
+                print("[audio] ⚠ 人声分离依赖不可用，本次按普通模式处理")
+                separate = False
 
         succeeded, failed = 0, []
         for idx, src_path in enumerate(audio_files, 1):
@@ -605,8 +699,18 @@ class TranslationPipeline:
                      "-i", src_path, "-ac", "1", "-ar", "16000", wav_path],
                     check=True, capture_output=True)
 
+                # 1.5 人声分离（可选）：人声轨做 ASR/克隆参考，伴奏最后混回
+                vocals_path = accomp_path = ""
+                if separate:
+                    from modules.vocal_separator import separate_vocals
+                    vocals_path, accomp_path = separate_vocals(
+                        wav_path, file_work, stem,
+                        model_name=self.config.vocal_separation_model,
+                        proxy=self.config.network_proxy)
+                asr_audio = vocals_path or wav_path
+
                 # 2. ASR + 断句合并 + 句读边界对齐
-                segments = transcriber.transcribe(wav_path, source_lang)
+                segments = transcriber.transcribe(asr_audio, source_lang)
                 if not segments:
                     raise RuntimeError("ASR 无结果")
                 from modules.segment_merger import merge_segments, rebalance_segments
@@ -623,16 +727,24 @@ class TranslationPipeline:
                 srt_path = os.path.join(out_rel_dir, f"{stem}_{target_lang}.srt")
                 self.subtitle_gen.generate_srt(segments, srt_path)
 
-                # 5. TTS 配音（IndexTTS 逐片段克隆本文件原声）
+                # 5. TTS 配音（IndexTTS 逐片段克隆本文件原声；拟声词保留原声）
+                keep_src = ""
+                if self.config.keep_nonspeech_original:
+                    keep_src = vocals_path or wav_path
                 tts_dir = os.path.join(file_work, "tts")
-                tts_results = tts.synthesize(segments, target_lang, tts_dir)
+                tts_results = self._tts_with_keep_original(tts, segments, target_lang, tts_dir, keep_src)
                 if not tts_results:
                     raise RuntimeError("TTS 无结果")
 
-                # 6. 按原始时长混音（变速对齐到片段时间轴）
+                # 6. 按原始时长混音（变速对齐到片段时间轴；分离模式混入全音量伴奏）
                 duration = self.composer.get_video_duration(src_path)
                 mixed_wav = os.path.join(file_work, f"{stem}_mixed.wav")
-                self.composer.mix_tts_audio(tts_results, duration, mixed_wav, None)
+                if accomp_path:
+                    self.composer.mix_tts_audio(
+                        tts_results, duration, mixed_wav, accomp_path,
+                        original_volume=self.config.accompaniment_volume)
+                else:
+                    self.composer.mix_tts_audio(tts_results, duration, mixed_wav, None)
 
                 # 7. 转 mp3 输出
                 out_audio = os.path.join(out_rel_dir, f"{stem}_{target_lang}.mp3")

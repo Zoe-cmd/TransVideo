@@ -32,11 +32,22 @@ REM ----- Dependency check: install when missing -----
 if errorlevel 1 (
     echo [run] Installing dependencies, first run or missing deps ...
     "%VENV_PY%" -m pip install --upgrade pip
-    "%VENV_PY%" -m pip install -r requirements.txt
+    REM Read proxy from .env if configured
+    set "PROXY_ARG="
+    if exist ".env" (
+        for /f "tokens=1,* delims==" %%a in ('findstr /b "NETWORK_PROXY=" .env') do (
+            if not "%%b"=="" set "PROXY_ARG=--proxy %%b"
+        )
+    )
+    "%VENV_PY%" -m pip install -r requirements.txt %PROXY_ARG%
     if errorlevel 1 (
-        echo [run] ERROR: dependency installation failed, check your network
-        pause
-        exit /b 1
+        echo [run] Official PyPI failed, switching to Aliyun mirror ...
+        "%VENV_PY%" -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+        if errorlevel 1 (
+            echo [run] ERROR: dependency installation failed. Check network, or set NETWORK_PROXY in .env
+            pause
+            exit /b 1
+        )
     )
 )
 

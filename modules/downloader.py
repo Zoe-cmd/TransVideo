@@ -31,6 +31,7 @@ class VideoDownloader:
         self.youtube_parser = YouTubeParser(
             proxy=config.network_proxy or None,
             tiktok_cookies_browser=getattr(config, "tiktok_cookies_browser", "") or None,
+            cookies_file=getattr(config, "youtube_cookies_file", "") or None,
         )
 
     def is_local_file(self, source: str) -> bool:

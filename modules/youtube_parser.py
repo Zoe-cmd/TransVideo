@@ -60,16 +60,20 @@ class YouTubeParser:
     SUPPORTED_BROWSERS = ["chrome", "firefox", "edge", "brave", "opera", "safari"]
 
     def __init__(self, proxy: Optional[str] = None,
-                 tiktok_cookies_browser: Optional[str] = None):
+                 tiktok_cookies_browser: Optional[str] = None,
+                 cookies_file: Optional[str] = None):
         """
         Args:
             proxy: 代理地址，如 http://127.0.0.1:7890
                     None 则从环境变量 HTTP_PROXY/HTTPS_PROXY 读取
             tiktok_cookies_browser: 用于 TikTok 的浏览器（如 "chrome"），
                     从该浏览器提取 cookies 绕过反爬。None 则不使用。
+            cookies_file: cookies.txt 文件路径（Netscape 格式，浏览器扩展导出），
+                    优先于浏览器自动提取，且无需关闭浏览器
         """
         self.proxy = proxy or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
         self.tiktok_cookies_browser = tiktok_cookies_browser
+        self.cookies_file = cookies_file if cookies_file and os.path.isfile(cookies_file) else None
 
     def _is_tiktok_url(self, url: str) -> bool:
         """判断是否为 TikTok 链接"""
@@ -95,6 +99,17 @@ class YouTubeParser:
         # 代理
         if self.proxy:
             opts["proxy"] = self.proxy
+
+        # YouTube 风控关键依赖：yt-dlp 2026.x 起 nsig 签名必须由外部 JS 运行时
+        # （node/deno）解算，没有运行时 → 流地址一律 403。自动检测/下载（见 js_runtime_setup）。
+        # remote_components 允许 yt-dlp 拉取官方 EJS 解算脚本（仅首次，有缓存）。
+        # 旧版 yt-dlp 会忽略这两个未知参数，不会产生副作用。
+        if not is_tiktok:
+            from . import js_runtime_setup
+            runtimes = js_runtime_setup.get_js_runtimes(proxy=self.proxy or "")
+            if runtimes:
+                opts["js_runtimes"] = runtimes
+                opts["remote_components"] = {"ejs:github"}
 
         # TikTok 特殊策略
         if tiktok_strategy > 0:
@@ -130,6 +145,21 @@ class YouTubeParser:
                 else:
                     print(f"[youtube] TikTok 策略3: 移动 API + 随机 device_id")
 
+        # YouTube 专属策略（风控绕过）
+        # 默认 web 客户端在数据中心/代理 IP 上容易吃到 403（视频流地址拒绝访问）。
+        # 实测：android_vr/testsuite 客户端能出全部高清格式（最高 4K），值得作为回退。
+        if not is_tiktok:
+            if tiktok_strategy == 4:
+                # 高清回退：android_vr / android_testsuite 客户端（完整格式列表）
+                opts["extractor_args"] = {
+                    "youtube": {"player_client": ["android_vr", "android_testsuite"]},
+                }
+                print("[youtube] 策略: 切换播放器客户端 (android_vr) 绕过风控")
+            elif tiktok_strategy == 6 and self.cookies_file:
+                # cookies.txt 文件（免关浏览器，优先于浏览器数据库自动提取）
+                opts["cookiefile"] = self.cookies_file
+                print(f"[youtube] 策略: 使用 cookies 文件 {os.path.basename(self.cookies_file)}")
+
         if download and output_path:
             # 格式选择：TikTok 与普通流媒体不同
             # TikTok 使用 DASH 格式，视频流和音频流是分开存储的。
@@ -155,12 +185,14 @@ class YouTubeParser:
                 )
             opts.update({
                 "outtmpl": output_path,
-                "format": format_str,
                 "merge_output_format": "mp4",
                 # 字幕
                 "writesubtitles": False,
                 "writeautomaticsub": False,
             })
+            # 保底策略（5）已自带 format，不覆盖
+            if "format" not in opts:
+                opts["format"] = format_str
 
         return opts
 
@@ -225,9 +257,14 @@ class YouTubeParser:
         is_tiktok = self._is_tiktok_url(url)
         has_cookies = bool(self.tiktok_cookies_browser)
 
-        # 构建策略列表：默认策略总是启用；配置了 cookies 浏览器时追加 cookies 回退
-        # （YouTube 对数据中心/代理 IP 会间歇性触发"人机验证"/403，浏览器 cookies 可绕过）
+        # 构建策略列表：默认策略总是启用；YouTube 追加播放器客户端切换策略；
+        # 配置了 cookies 浏览器时追加 cookies 回退
+        # （YouTube 对数据中心/代理 IP 会间歇性触发"人机验证"/403，换客户端或 cookies 可绕过）
         strategies = [0]
+        if not is_tiktok:
+            strategies.append(4)   # 切换客户端（android_vr 高清）
+        if not is_tiktok and self.cookies_file:
+            strategies.append(6)   # cookies.txt 文件（免关浏览器，优先于浏览器提取）
         if has_cookies:
             strategies.append(1)
         if is_tiktok:
@@ -235,7 +272,8 @@ class YouTubeParser:
             if has_cookies:
                 strategies.append(3)
 
-        strategy_names = {0: "默认", 1: "cookies", 2: "移动API", 3: "组合"}
+        strategy_names = {0: "默认", 1: "cookies", 2: "移动API", 3: "组合",
+                          4: "客户端切换", 6: "cookies文件"}
         errors = []
 
         for idx, strategy in enumerate(strategies):
@@ -299,22 +337,34 @@ class YouTubeParser:
 
         # 所有策略都失败
         if not is_tiktok:
-            cookies_hint = (
-                "  ★ 在 .env 设置 TIKTOK_COOKIES_BROWSER=edge（或 chrome/firefox），\n"
-                "    并先在浏览器登录 youtube.com，程序可自动提取 cookies 绕过验证\n"
-                "    （注意：提取时需先完全关闭对应浏览器，否则 cookie 数据库被占用）\n"
-            ) if not has_cookies else (
-                "  ★ cookies 提取失败时，请先完全关闭对应浏览器再重试\n"
-            )
+            if self.cookies_file:
+                cookies_hint = (
+                    "  ★ cookies 文件已使用但仍失败：cookie 可能已过期，\n"
+                    "    请用浏览器扩展（Get cookies.txt LOCALLY）重新导出后在 .env 更新 YOUTUBE_COOKIES_FILE\n"
+                )
+            elif not has_cookies:
+                cookies_hint = (
+                    "  ★ 方法一：用浏览器扩展（Get cookies.txt LOCALLY）在登录 youtube.com 后导出\n"
+                    "    cookies.txt，然后在 .env 设置 YOUTUBE_COOKIES_FILE=文件路径（推荐，免关浏览器）\n"
+                    "  ★ 方法二：在 .env 设置 TIKTOK_COOKIES_BROWSER=edge（或 chrome/firefox），\n"
+                    "    程序自动提取浏览器 cookies（需先完全关闭对应浏览器）\n"
+                )
+            else:
+                cookies_hint = (
+                    "  ★ cookies 提取失败时，请先完全关闭对应浏览器再重试；\n"
+                    "    或在 .env 设置 YOUTUBE_COOKIES_FILE 指向导出的 cookies.txt（免关浏览器）\n"
+                )
             raise RuntimeError(
                 f"视频下载失败（尝试了 {len(errors)} 种策略）:\n" +
                 "\n".join(f"  - {e}" for e in errors) +
                 "\n\n解决方法:\n"
                 "  1. YouTube 对代理 IP 的风控是间歇性的，稍等几分钟到几小时后重试\n"
                 f"{cookies_hint}"
-                "  2. 更新 yt-dlp: pip install -U yt-dlp\n"
-                "  3. 检查代理是否可用\n"
-                "  4. 视频可能已被删除或地区受限"
+                "  2. 更换代理节点（当前节点 IP 可能已被 YouTube 标记）\n"
+                "  3. 确认 JS 运行时可用（yt-dlp 新版解签名必需）：安装 Node.js，\n"
+                "     或让程序自动下载 deno（首次下载 YouTube 时会自动进行）\n"
+                "  4. 更新 yt-dlp: pip install -U yt-dlp\n"
+                "  5. 视频可能已被删除或地区受限"
             )
 
         cookies_hint = (

@@ -243,6 +243,10 @@ def interactive_main():
     """交互式主流程"""
     banner()
 
+    # 首次运行（无 .env）自动生成配置文件模板，方便用户后续编辑
+    if not os.path.isfile(CONFIG_FILE_NAME):
+        create_config_template(".")
+
     config = load_config()
 
     # 全局代理：在程序启动时设置，让所有网络请求都走代理
@@ -737,6 +741,7 @@ def interactive_config(config: Config):
         info("TTS 音色", f"zh={config.tts_voice_zh} / en={config.tts_voice_en}")
         info("字幕样式", f"{config.subtitle_style} / {config.subtitle_fontsize}px / margin_v={config.subtitle_margin_v}")
         info("换行阈值", f"{config.subtitle_max_width_percent:.0%}")
+        info("人声分离", "开（保留背景音）" if config.separate_vocals else "关")
         info("OpenAI Key", "已设置" if config.has_openai() else "未设置")
         if config.has_openai():
             info("OpenAI URL", config.openai_base_url)
@@ -749,14 +754,16 @@ def interactive_config(config: Config):
             "更改翻译引擎 / Ollama 模型",
             "更改 TTS 引擎 / 音色",
             "更改字幕设置（样式/字号/边距/换行）",
+            "音频处理（人声分离 / 背景音保留 / 拟声词原声）",
             "OpenAI 配置（API Key / URL / 翻译模型 / 备选模型 / Whisper API）",
             "设置网络代理（YouTube 必需）",
             "设置 TikTok cookies 浏览器（绕过反爬）",
+            "设置 YouTube cookies.txt 文件（免关浏览器）",
             "查看完整配置文件",
             "返回",
-        ], default=8)
+        ], default=10)
 
-        if choice == 8 or choice is None:
+        if choice == 10 or choice is None:
             return
         elif choice == 0:
             _config_asr(config)
@@ -767,8 +774,10 @@ def interactive_config(config: Config):
         elif choice == 3:
             _config_subtitle(config)
         elif choice == 4:
-            _config_openai(config)
+            _config_audio_processing(config)
         elif choice == 5:
+            _config_openai(config)
+        elif choice == 6:
             # 设置网络代理
             print(f"\n{Color.DIM}当前代理: {config.network_proxy or '未设置'}{Color.RESET}")
             print(f"{Color.DIM}YouTube 国内访问需要代理，常用代理地址:{Color.RESET}")
@@ -785,7 +794,7 @@ def interactive_config(config: Config):
                 config.network_proxy = proxy
                 success(f"代理已设置为: {proxy}")
                 _save_config(config)
-        elif choice == 6:
+        elif choice == 7:
             # 设置 TikTok cookies 浏览器（用上下键选择）
             print(f"\n{Color.DIM}TikTok 反爬严格，经常报 \"Unable to extract universal data\"{Color.RESET}")
             print(f"{Color.DIM}解决方法：在浏览器中登录 https://www.tiktok.com 后，{Color.RESET}")
@@ -811,7 +820,26 @@ def interactive_config(config: Config):
                 config.tiktok_cookies_browser = ""
                 success("已清除 TikTok cookies 设置")
                 _save_config(config)
-        elif choice == 7:
+        elif choice == 8:
+            # 设置 YouTube cookies.txt 文件（免关浏览器，长期有效直到过期）
+            print(f"\n{Color.DIM}当前: {config.youtube_cookies_file or '未设置'}{Color.RESET}")
+            print(f"{Color.DIM}用途：YouTube 对代理 IP 风控时，用登录态 cookies 绕过 403{Color.RESET}")
+            print(f"{Color.DIM}获取：安装浏览器扩展「Get cookies.txt LOCALLY」，登录 youtube.com{Color.RESET}")
+            print(f"{Color.DIM}      后导出 cookies.txt，把文件路径填到这里{Color.RESET}")
+            print(f"{Color.DIM}      留空清除设置{Color.RESET}\n")
+            val = input(f"{Color.CYAN}cookies.txt 路径: {Color.RESET}").strip().strip('"')
+            if val == "":
+                if config.youtube_cookies_file and confirm("确认清除 YouTube cookies 设置?", default_yes=False):
+                    config.youtube_cookies_file = ""
+                    success("已清除")
+                    _save_config(config)
+            elif os.path.isfile(val):
+                config.youtube_cookies_file = val
+                success(f"YouTube cookies 文件已设置: {val}")
+                _save_config(config)
+            else:
+                warn(f"文件不存在: {val}")
+        elif choice == 9:
             if config.config_file_path and os.path.isfile(config.config_file_path):
                 print(f"\n{Color.HEADER}=== 配置文件内容 ==={Color.RESET}\n")
                 with open(config.config_file_path, "r", encoding="utf-8") as f:
@@ -819,6 +847,49 @@ def interactive_config(config: Config):
             else:
                 warn("未找到配置文件")
             pause()
+
+
+def _config_audio_processing(config: Config):
+    """音频处理：人声分离 / 伴奏音量 / 拟声词原声保留"""
+    while True:
+        section("音频处理（人声分离）")
+        info("人声分离", "开（保留背景音）" if config.separate_vocals else "关")
+        info("分离模型", config.vocal_separation_model)
+        info("拟声词保留原声", "开" if config.keep_nonspeech_original else "关")
+        info("伴奏音量", f"{config.accompaniment_volume:.0%}")
+        print(f"  {Color.DIM}人声分离：先把音频拆成人声轨+伴奏轨，只替换人声，背景音全音量保留{Color.RESET}")
+        print(f"  {Color.DIM}适合外语 ASMR、带 BGM 的视频；首次使用自动安装分离组件并下载模型{Color.RESET}")
+        print(f"  {Color.DIM}拟声词保留：喘息/笑声/语气词等非语言人声不配音，直接保留原声{Color.RESET}\n")
+
+        choice = choose("修改项", [
+            f"{'关闭' if config.separate_vocals else '开启'}人声分离（保留背景音）",
+            f"{'关闭' if config.keep_nonspeech_original else '开启'}拟声词/非语言人声保留原声",
+            "调整伴奏音量",
+            "返回",
+        ], default=3)
+
+        if choice == 3 or choice is None:
+            return
+        elif choice == 0:
+            config.separate_vocals = not config.separate_vocals
+            success(f"人声分离已{'开启，背景音将全音量保留' if config.separate_vocals else '关闭'}")
+            _save_config(config)
+        elif choice == 1:
+            config.keep_nonspeech_original = not config.keep_nonspeech_original
+            success(f"拟声词保留原声已{'开启' if config.keep_nonspeech_original else '关闭'}")
+            _save_config(config)
+        elif choice == 2:
+            val = input(f"{Color.CYAN}伴奏音量（0.1-1.0，当前 {config.accompaniment_volume}）: {Color.RESET}").strip()
+            try:
+                v = float(val)
+                if 0.0 < v <= 1.0:
+                    config.accompaniment_volume = v
+                    success(f"伴奏音量已设置为 {v:.0%}")
+                    _save_config(config)
+                else:
+                    warn("音量需在 0.1-1.0 之间")
+            except ValueError:
+                warn("输入无效")
 
 
 def _config_openai(config: Config):
@@ -1149,7 +1220,7 @@ def _config_tts(config: Config):
             idx = choose("TTS 引擎", [
                 "edge (免费, 微软在线)",
                 "azure (需 Key, 质量更好)",
-                "index (本地 GPU, IndexTTS 2, 克隆原声并保留情感)",
+                "index (本地 GPU, IndexTTS 2.5, 克隆原声并保留情感)",
             ], default={"edge":0, "azure":1, "index":2}.get(config.tts_engine, 0))
             if idx is None:
                 pass  # 取消
@@ -1205,7 +1276,7 @@ def _config_tts(config: Config):
 
 
 def _maybe_install_indextts(force_prompt: bool = False):
-    """检测 IndexTTS 2 环境，未就绪时提供一键自动安装
+    """检测 IndexTTS 2.5 环境，未就绪时提供一键自动安装
 
     force_prompt=True 时（从菜单主动进入）即使已就绪也显示状态。
     """
@@ -1213,14 +1284,14 @@ def _maybe_install_indextts(force_prompt: bool = False):
 
     ready, detail = indextts_status()
     if ready:
-        success(f"IndexTTS 2 环境已就绪（{detail}）")
+        success(f"IndexTTS 2.5 环境已就绪（{detail}）")
         return
 
-    print(f"\n{Color.YELLOW}IndexTTS 2 {detail}{Color.RESET}")
+    print(f"\n{Color.YELLOW}IndexTTS 2.5 {detail}{Color.RESET}")
     print(f"{Color.DIM}自动安装将执行: 克隆 index-tts 仓库 → uv sync 安装依赖 → 下载模型权重")
     print(f"共约 8GB 下载量，会读取 .env 中的 NETWORK_PROXY 作为下载代理{Color.RESET}")
 
-    idx = choose("是否现在自动安装 IndexTTS 2 环境？", [
+    idx = choose("是否现在自动安装 IndexTTS 2.5 环境？", [
         "立即自动安装（约 8GB，请耐心等待）",
         "暂不安装",
     ], default=1 if not force_prompt else 0)
@@ -1230,7 +1301,7 @@ def _maybe_install_indextts(force_prompt: bool = False):
         return
 
     if install_indextts():
-        success("IndexTTS 2 环境安装完成！")
+        success("IndexTTS 2.5 环境安装完成！")
     else:
         print(f"{Color.RED}安装未完成，可重试或手动运行: python scripts/setup_indextts.py{Color.RESET}")
 

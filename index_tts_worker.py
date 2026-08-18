@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""IndexTTS 2 子进程 worker —— 在 index-tts/.venv 环境中运行
+"""IndexTTS 2.5 / 2 子进程 worker —— 在 index-tts 的虚拟环境中运行
 
 由 modules/tts_engine.py 的 IndexTTSEngine 调用：
   python index_tts_worker.py <job.json>
 
 job.json 格式：
   {
-    "model_dir": ".../index-tts/checkpoints",
-    "use_fp16": true, "use_deepspeed": false, "use_accel": false,
+    "model_dir": ".../index-tts/checkpoints_25",
+    "version": "2.5",                // "2.5"（默认）或 "2"（旧版兼容）
+    "lang": "ZH",                    // 2.5 必需：合成文本的语言（ZH/EN/JA/ES/AR/KO...）
+    "use_fp16": true,                // 2.5 中映射为 use_bf16（官方推荐半精度）
+    "use_deepspeed": false, "use_accel": false,
     "items": [{"index": 0, "text": "...", "ref_audio": "...wav",
                "emo_audio": "...wav", "output_path": "...wav"}],
     "result_path": ".../_index_tts_result.json"
@@ -33,25 +36,35 @@ def main():
 
     model_dir = job["model_dir"]
     cfg_path = os.path.join(model_dir, "config.yaml")
+    version = str(job.get("version", "2.5"))
+    lang = str(job.get("lang", "ZH"))
+    is_v25 = version == "2.5"
 
-    print(f"[worker] 加载 IndexTTS-2 模型: {model_dir}", flush=True)
-    from indextts.infer_v2 import IndexTTS2
+    print(f"[worker] 加载 IndexTTS-{version} 模型: {model_dir}", flush=True)
+    if is_v25:
+        from indextts.infer_v2_5 import IndexTTS2
+    else:
+        from indextts.infer_v2 import IndexTTS2
 
     # use_accel: GPT 加速引擎（flash-attn + KV cache + CUDA graph），需 flash-attn
-    # use_cuda_kernel: BigVGAN 声码器融合 kernel，需 nvcc+MSVC，失败自动回退
+    # use_cuda_kernel: BigVGAN 声码器融合 kernel，失败自动回退
     # use_torch_compile: torch.compile 编译 s2mel 扩散模型，需 triton-windows
+    # 2.5 官方推荐 use_bf16（半精度，更快更省显存），复用 use_fp16 开关
     opts = dict(
-        use_fp16=bool(job.get("use_fp16", False)),
         use_cuda_kernel=bool(job.get("use_cuda_kernel", False)),
         use_deepspeed=bool(job.get("use_deepspeed", False)),
         use_accel=bool(job.get("use_accel", False)),
         use_torch_compile=bool(job.get("use_torch_compile", False)),
     )
+    if is_v25:
+        opts["use_bf16"] = bool(job.get("use_fp16", True))
+    else:
+        opts["use_fp16"] = bool(job.get("use_fp16", False))
     try:
         tts = IndexTTS2(cfg_path=cfg_path, model_dir=model_dir, **opts)
     except Exception as e:
         # 加速依赖缺失（如 flash-attn / triton 未安装）时自动降级为基础模式
-        if opts["use_accel"] or opts["use_torch_compile"] or opts["use_cuda_kernel"]:
+        if opts.get("use_accel") or opts.get("use_torch_compile") or opts.get("use_cuda_kernel"):
             print(f"[worker] 加速模式初始化失败（{e}），自动降级为基础模式重试", flush=True)
             opts["use_accel"] = False
             opts["use_torch_compile"] = False
@@ -72,6 +85,11 @@ def main():
                 output_path=out,
                 verbose=False,
             )
+            if is_v25:
+                # 2.5 必需指定文本语言；可选 duration_factor 控制语速
+                kwargs["lang"] = item.get("lang", lang)
+                if item.get("duration_factor"):
+                    kwargs["duration_factor"] = float(item["duration_factor"])
             # 情感参考音频（与音色参考一致时即为保留原声情感）
             if item.get("emo_audio"):
                 kwargs["emo_audio_prompt"] = item["emo_audio"]
