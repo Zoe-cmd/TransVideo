@@ -758,7 +758,7 @@ def interactive_config(config: Config):
             "OpenAI 配置（API Key / URL / 翻译模型 / 备选模型 / Whisper API）",
             "设置网络代理（YouTube 必需）",
             "设置 TikTok cookies 浏览器（绕过反爬）",
-            "设置 YouTube cookies.txt 文件（免关浏览器）",
+            "设置 YouTube cookies（免关浏览器，支持 JSON / Netscape / 直接粘贴）",
             "查看完整配置文件",
             "返回",
         ], default=10)
@@ -821,24 +821,7 @@ def interactive_config(config: Config):
                 success("已清除 TikTok cookies 设置")
                 _save_config(config)
         elif choice == 8:
-            # 设置 YouTube cookies.txt 文件（免关浏览器，长期有效直到过期）
-            print(f"\n{Color.DIM}当前: {config.youtube_cookies_file or '未设置'}{Color.RESET}")
-            print(f"{Color.DIM}用途：YouTube 对代理 IP 风控时，用登录态 cookies 绕过 403{Color.RESET}")
-            print(f"{Color.DIM}获取：安装浏览器扩展「Get cookies.txt LOCALLY」，登录 youtube.com{Color.RESET}")
-            print(f"{Color.DIM}      后导出 cookies.txt，把文件路径填到这里{Color.RESET}")
-            print(f"{Color.DIM}      留空清除设置{Color.RESET}\n")
-            val = input(f"{Color.CYAN}cookies.txt 路径: {Color.RESET}").strip().strip('"')
-            if val == "":
-                if config.youtube_cookies_file and confirm("确认清除 YouTube cookies 设置?", default_yes=False):
-                    config.youtube_cookies_file = ""
-                    success("已清除")
-                    _save_config(config)
-            elif os.path.isfile(val):
-                config.youtube_cookies_file = val
-                success(f"YouTube cookies 文件已设置: {val}")
-                _save_config(config)
-            else:
-                warn(f"文件不存在: {val}")
+            _config_youtube_cookies(config)
         elif choice == 9:
             if config.config_file_path and os.path.isfile(config.config_file_path):
                 print(f"\n{Color.HEADER}=== 配置文件内容 ==={Color.RESET}\n")
@@ -847,6 +830,56 @@ def interactive_config(config: Config):
             else:
                 warn("未找到配置文件")
             pause()
+
+
+def _config_youtube_cookies(config: Config):
+    """YouTube cookies 设置：支持 Cookie-Editor JSON / Netscape / 直接粘贴 cookie 字符串"""
+    from modules import cookies_setup
+
+    section("YouTube cookies 设置")
+    info("当前", config.youtube_cookies_file or "未设置")
+    print(f"{Color.DIM}用途：YouTube 对代理 IP 风控（403）时，用登录态 cookies 绕过{Color.RESET}")
+    print(f"{Color.DIM}以下三种方式任选，格式自动识别：{Color.RESET}")
+    print(f"{Color.DIM}  · Cookie-Editor 扩展 → 导出 JSON 或 Netscape 格式文件{Color.RESET}")
+    print(f"{Color.DIM}  · 浏览器 F12 → Network → 任意 youtube.com 请求 → 复制 Cookie 请求头的值{Color.RESET}")
+
+    idx = choose("导入方式", [
+        "从文件导入（Cookie-Editor 导出的 JSON / Netscape txt）",
+        "粘贴 Cookie 字符串（浏览器 F12 复制的请求头）",
+        "清除 YouTube cookies 设置",
+        "返回",
+    ], default=0)
+
+    if idx is None or idx == 3:
+        return
+    if idx == 2:
+        if confirm("确认清除 YouTube cookies 设置?", default_yes=False):
+            from modules.cookies_setup import clear_youtube_cookies
+            success(clear_youtube_cookies())
+            config.youtube_cookies_file = ""
+        return
+
+    if idx == 0:
+        val = input(f"{Color.CYAN}文件路径: {Color.RESET}").strip().strip('"').strip("'")
+        if not val:
+            return
+        if not os.path.isfile(val):
+            warn(f"文件不存在: {val}")
+            return
+        source = val
+    else:
+        print(f"{Color.DIM}请粘贴 cookie 内容（一整行，形如 SID=xxx; HSID=yyy; ...），回车结束:{Color.RESET}")
+        source = input(f"{Color.CYAN}> {Color.RESET}").strip()
+        if not source:
+            return
+
+    ok, msg = cookies_setup.import_youtube_cookies(source)
+    if ok:
+        success(msg)
+        config.youtube_cookies_file = os.path.join(cookies_setup.PROJECT_ROOT,
+                                                   cookies_setup.SAVE_NAME)
+    else:
+        warn(msg)
 
 
 def _config_audio_processing(config: Config):

@@ -163,6 +163,7 @@ python cli.py
 | OpenAI 配置 | API Key、Base URL、翻译模型及备选模型链、Whisper API 模型 |
 | 设置网络代理 | YouTube / HuggingFace 下载必需 |
 | 设置 TikTok cookies 浏览器 | 借用浏览器 cookies 绕过反爬 |
+| 设置 YouTube cookies | 登录态 cookies 绕过 403 风控；支持 Cookie-Editor JSON / Netscape 文件导入、直接粘贴 Cookie 字符串，格式自动识别 |
 | 查看完整配置文件 | 打开 `.env` 内容 |
 
 所有修改自动保存到 `.env`，下次启动继续生效。
@@ -439,7 +440,11 @@ A: 先分清两种原因：
 1. **缺 JS 运行时（最常见，2026 年起）**：yt-dlp 新版必须借助外部 JS 运行时（Node.js 或 deno）解算 YouTube 的 nsig 签名，没有运行时所有流地址都会 403。项目会在首次下载 YouTube 时自动检测：有 node/deno 就直接用；都没有则自动下载 deno 到项目 `.tools/` 目录（约 30MB，进度可见，仅需一次）。想手动装的话装 [Node.js](https://nodejs.org) 即可。
 2. **代理出口 IP 被 YouTube 风控**：特征是所有匿名客户端全部 403、但 android 客户端 360p 能下。此时代码层面无解，只能：
    - 稍等几分钟到几小时重试（风控通常自动解除），或更换代理节点；
-   - 一劳永逸：浏览器装「Get cookies.txt LOCALLY」扩展，登录 youtube.com 后导出 cookies.txt，在 `.env` 设置 `YOUTUBE_COOKIES_FILE=文件路径`（或在配置菜单里设置），免关浏览器、长期有效；
+   - **一劳永逸：导入登录态 cookies**。配置菜单选「设置 YouTube cookies」，三种方式任选（格式自动识别，都会统一转成 yt-dlp 要求的 Netscape 格式）：
+     - Cookie-Editor 扩展导出 **JSON** 或 **Netscape** 文件 → 选「从文件导入」；
+     - 浏览器 F12 → Network → 任意 youtube.com 请求 → 复制 **Cookie 请求头**的值 → 选「粘贴 Cookie 字符串」。
+     - 也可以直接在 `.env` 设置 `YOUTUBE_COOKIES_FILE=文件路径` 指向已有的 cookies.txt。
+     免关浏览器、长期有效（直到 Google 会话过期，届时重新导入即可）；
    - 也可以在 `.env` 设 `TIKTOK_COOKIES_BROWSER=edge` 让程序自动提取浏览器 cookies，但**提取时需先完全关闭对应浏览器**（含托盘/后台进程），否则数据库被锁。
 
 下载策略链会自动回退：默认（含 JS 运行时解签名）→ 客户端切换（android_vr 高清）→ cookies 文件 → 浏览器 cookies。
